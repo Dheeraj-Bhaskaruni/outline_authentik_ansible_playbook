@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: {{ outline_db_user }}
+      POSTGRES_PASSWORD: {{ outline_db_password }}
+      POSTGRES_DB: {{ outline_db_name }}
+    volumes:
+      - database-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    volumes:
+      - ./redis.conf:/redis.conf:ro
+    command: ["redis-server", "/redis.conf"]
+    restart: unless-stopped
+
+  outline:
+    image: docker.getoutline.com/outlinewiki/outline:latest
+    env_file: ./docker.env
+    ports:
+      - "3000:3000"
+    volumes:
+      - storage-data:/var/lib/outline/data
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    restart: unless-stopped
+
+volumes:
+  database-data:
+  storage-data:

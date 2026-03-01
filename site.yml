@@ -1,0 +1,90 @@
+---
+- name: Deploy Outline + Authentik
+  hosts: all
+  become: true
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - outline_url is defined
+          - outline_secret_key is defined
+          - outline_utils_secret is defined
+          - authentik_secret_key is defined
+          - outline_oidc_client_id is defined
+          - outline_oidc_client_secret is defined
+          - outline_oidc_slug is defined
+        fail_msg: "Set required variables in group_vars/all.yml before running this playbook"
+
+  tasks:
+    - name: Install base packages (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - docker.io
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Ensure Docker service is running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create stack directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ stack_root }}"
+        - "{{ outline_dir }}"
+        - "{{ authentik_dir }}"
+
+    - name: Render Outline compose file
+      ansible.builtin.template:
+        src: templates/outline-docker-compose.yml.j2
+        dest: "{{ outline_dir }}/docker-compose.yml"
+        mode: "0644"
+
+    - name: Render Outline env file
+      ansible.builtin.template:
+        src: templates/outline-docker.env.j2
+        dest: "{{ outline_dir }}/docker.env"
+        mode: "0600"
+
+    - name: Render Outline redis config
+      ansible.builtin.template:
+        src: templates/redis.conf.j2
+        dest: "{{ outline_dir }}/redis.conf"
+        mode: "0644"
+
+    - name: Render Authentik compose file
+      ansible.builtin.template:
+        src: templates/authentik-docker-compose.yml.j2
+        dest: "{{ authentik_dir }}/docker-compose.yml"
+        mode: "0644"
+
+    - name: Start Authentik stack
+      ansible.builtin.command: docker compose up -d
+      args:
+        chdir: "{{ authentik_dir }}"
+      changed_when: false
+
+    - name: Start Outline stack
+      ansible.builtin.command: docker compose up -d
+      args:
+        chdir: "{{ outline_dir }}"
+      changed_when: false
+
+    - name: Show endpoints
+      ansible.builtin.debug:
+        msg:
+          - "Outline: {{ outline_url }}"
+          - "Authentik: {{ authentik_external_url }}"
+          - "Next: create/update Authentik app slug '{{ outline_oidc_slug }}' and set redirect URI '{{ outline_url }}/auth/oidc.callback'"
