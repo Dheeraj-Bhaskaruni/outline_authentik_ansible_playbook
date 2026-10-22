@@ -1,95 +1,104 @@
-# Outline on your own domain, behind Cloudflare Access
+# Personal knowledge platform: Outline, safely on your own domain
 
-Deploys Outline (wiki/notes) as Docker Compose stacks on a Debian/Ubuntu box
-such as a 2014 Mac mini, publishes it on your domain through an
-Access-protected Cloudflare Tunnel, and signs you in with Google (or any
-identity provider Cloudflare supports). Cloudflare's App Launcher becomes
-your dashboard. Outline's built-in MCP server works with Claude.
+Ansible deploys [Outline](https://www.getoutline.com) (wiki, notes, knowledge
+base) on a small Linux box such as a 2014 Mac mini, and gives it three doors:
 
-Guides: [Cloudflare + cPanel runbook](docs/cloudflare-security.md) ·
-[Mac mini host](docs/mac-mini-host.md) · [MCP and AI clients](docs/mcp-and-ai.md)
-
-## Modes
-
-| | `auth_mode: cloudflare` (recommended) | `auth_mode: authentik` |
+| Who | Door | Identity |
 | --- | --- | --- |
-| Login | Google via Cloudflare Access, once | Access, then Authentik |
-| Containers | Outline, PostgreSQL, Redis, cloudflared | + Authentik server/worker, PostgreSQL, Caddy |
-| RAM | under 1.5 GB | about 3 GB |
-| Extra secrets | Access OIDC client secret | Authentik keys, OIDC client, DNS API token |
-| Use when | personal or small-team notes | you need your own IdP for many apps |
+| You, from anywhere | Cloudflare Tunnel + Cloudflare Access | Google login (any IdP Cloudflare supports) |
+| Your machines, your phone | the same hostname over Tailscale or the home LAN | Tailscale identity + Outline API key / OAuth |
+| Hosted clients without Tailscale | Cloudflare, path app `/api/*` | Cloudflare service token + Outline API key |
 
-Lab mode (`cloudflare_tunnel_enabled: false`) binds the apps to `127.0.0.1`
-only, for testing over SSH port-forwarding or Tailscale.
+Nothing listens on the Internet. Cloudflare down: the private path still works.
+Claude and other agents read and write through Outline's built-in MCP server
+and REST API. The Android app signs in over the private path.
+
+Guides: [Cloudflare + cPanel](docs/cloudflare-security.md) ·
+[Private path (Tailscale/LAN)](docs/private-path.md) ·
+[Backups and restore](docs/backup-restore.md) ·
+[Agents and bots](docs/agents-and-bots.md) · [MCP](docs/mcp-and-ai.md) ·
+[Mac mini host](docs/mac-mini-host.md)
+
+## Architecture
+
+```
+ Internet (humans)                       Your machines
+ browser / PWA ----> Cloudflare Access ----> cloudflared --+        Tailscale / LAN
+                     (Google, MFA, 404 for unknown hosts)   |      +-- dnsmasq (split DNS)
+                                                            v      v
+                                                        outline:3000 <--- Caddy :443 (LE cert, bound to
+                                                            |             tailnet + LAN addresses only)
+                                       PostgreSQL 16 | Redis (noeviction) | uploads
+                                       restic -> R2 + USB | UFW | optional webhook consumer
+```
+
+Each tier is a tagged task file (`tasks/*.yml`); the `apps` list in
+`group_vars/all.yml` drives tunnel ingress, Caddy and DNS, so another service
+is one Compose directory plus one list entry.
 
 ## Security model
 
-- **No host ports in tunnel mode.** An outbound `cloudflared` connector carries
-  traffic and rejects every request without a valid Cloudflare Access token
-  for that hostname. Unknown hostnames return 404. Bots see Cloudflare's
-  login page, never your server.
-- PostgreSQL, Redis and MailHog never publish host ports.
-- Optional UFW firewall: deny inbound except SSH from a range you choose.
-- Credential files are root-owned (`0600`) or owned by the connector's uid
-  (`0400`); secret rendering suppresses logs and diffs.
-- Deployment rejects sample credentials, reused secrets, weak key formats,
-  HTTP URLs in production, floating image tags, and incomplete Cloudflare
-  settings (missing AUD tag, team name, credentials, OIDC client).
-- SSH host key checking is enabled; verify the server fingerprint first.
+- **No public host ports.** `cloudflared` rejects any request without a valid
+  Access token for that hostname; unknown hostnames get 404.
+- **Private path binds only** to the Tailscale (`100.64.0.0/10`) and RFC1918
+  addresses you configure; dnsmasq answers only the app hostnames.
+- PostgreSQL, Redis, the webhook consumer never publish ports.
+- Outline's rate limiter is on; Redis uses `noeviction` so job queues survive.
+- Secrets live in Ansible Vault; rendered files are `0600`/`0400`; rendering
+  suppresses logs and diffs.
+- Deployment rejects placeholder or reused secrets, HTTP URLs when published,
+  floating image tags in production, public bind addresses, weak backup
+  passwords and incomplete Cloudflare settings.
+- Nightly encrypted backups to two places with a documented restore drill.
 
-## Prerequisites
+## Deploy
 
-Install Ansible on the control machine (`uv venv .venv && uv pip install
-ansible-core pyyaml`). On the target install Docker Engine 28+ and the
-Compose plugin from Docker's repository; see the Mac mini guide for a full
-host setup. Update `inventory.ini` with the host and SSH user. Shared cPanel
-hosting cannot run Docker; the domain, website and email stay on cPanel.
-
-## Configure and deploy
-
-1. Follow Parts A and B of the runbook: move DNS to Cloudflare, add Google as
-   a login method, create the self-hosted Access application (AUD tag), the
-   SaaS/OIDC application (client ID and secret), the tunnel and its DNS CNAME.
-2. Copy `examples/production.yml` to `production.yml` and fill in URLs, team
-   name, AUD tag, client ID, SMTP and tested image digests.
-3. Copy `examples/secrets.yml` to `secrets.yml`: three `openssl rand -hex 32`
-   values, the tunnel credentials JSON, the OIDC client secret. Encrypt with
-   `ansible-vault encrypt secrets.yml`.
-4. Deploy:
+1. Host: Debian 13 + Docker 28 + Tailscale (`docs/mac-mini-host.md`).
+2. Cloudflare one-time setup (`docs/cloudflare-security.md` Parts A–B) and
+   Tailscale split DNS/ACL (`docs/private-path.md`).
+3. `cp examples/production.yml production.yml`, `cp examples/secrets.yml
+   secrets.yml`, fill both, `ansible-vault encrypt secrets.yml`.
+4. Edit `inventory.ini` with the host's tailnet address and user.
+5. Run:
 
    ```bash
-   ansible-playbook site.yml --syntax-check
-   ansible-playbook site.yml -e @production.yml -e @secrets.yml --ask-vault-pass
+   uv venv .venv && uv pip install --python .venv/bin/python ansible-core pyyaml
+   .venv/bin/python tests/validate_security.py
+   .venv/bin/ansible-playbook site.yml -e @production.yml -e @secrets.yml --ask-vault-pass --check --diff
+   .venv/bin/ansible-playbook site.yml -e @production.yml -e @secrets.yml --ask-vault-pass
    ```
 
-5. Open `https://notes.example.com`, sign in with Google, and your workspace
-   is created. Enable MCP under Settings > AI if you want Claude to use it.
+   `--tags backup`, `--tags edge` etc. touch one tier.
+6. Open the site, sign in with Google, enable MCP under Settings > AI.
 
-Access authorises who may reach the app; Outline roles decide what they can
-do. On an existing installation keep the current keys and database password;
-changing `POSTGRES_PASSWORD` does not rotate the password inside a volume.
+## Using it
+
+- **Dashboard**: `https://<team>.cloudflareaccess.com` (Cloudflare App Launcher).
+- **Claude**: `claude mcp add --transport http outline https://notes.example.com/mcp --header "Authorization: Bearer <key>"`.
+- **Agents**: `examples/clients/kb_client.py put --collection <id> --title "..." < file.md`
+  (idempotent; one scoped API key per machine).
+- **Bots**: Outline webhooks into the optional consumer (`automation_enabled`).
+- **Phone**: Tailscale + Outline PWA, or the Inkharbor Android app.
 
 ## Verification
 
 ```bash
-.venv/bin/python tests/validate_security.py
+.venv/bin/python tests/validate_security.py   # 41 scenarios, renders every tier
+.venv/bin/python tests/test_webhook_consumer.py
 ```
 
-Renders the real templates for lab, production, Authentik and Cloudflare-login
-modes and verifies: rejection of unsafe inputs (31 scenarios), loopback-only
-or no host ports, no database publishing, Access enforcement on every tunnel
-hostname with a 404 catch-all, credential file modes, OIDC wiring and HTTPS
-settings. It does not run Docker or touch Cloudflare. Then do the runbook's
-live acceptance checks.
+CI (`.github/workflows/ci.yml`) runs the same plus syntax checks on every push.
+Live acceptance checks are listed at the end of each guide.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
-| `site.yml` | Playbook: validation, rendering, firewall, Compose stacks |
-| `group_vars/all.yml` | Defaults and documented variables |
-| `templates/*-docker-compose.yml.j2` | Outline, Authentik and edge stacks |
-| `templates/cloudflared-*.j2`, `templates/Caddyfile.j2` | Edge configuration |
-| `files/caddy/Dockerfile` | Caddy with the Cloudflare DNS module (Authentik mode) |
-| `examples/` | Copy to `production.yml` / `secrets.yml` (gitignored) |
-| `tests/validate_security.py` | Offline safety checks |
+| `site.yml`, `restore.yml` | Entry points |
+| `tasks/*.yml` | Tiers: validate, docker, outline, edge, firewall, backup, start |
+| `group_vars/all.yml` | All variables, documented, with the `apps` list |
+| `templates/` | Compose files, env, Caddyfile, dnsmasq, cloudflared, backup units |
+| `files/` | Caddy and dnsmasq Dockerfiles, webhook consumer |
+| `examples/` | `production.yml`, `secrets.yml`, agent clients |
+| `tests/` | Offline security checks and unit tests |
+| `docs/` | Runbooks |

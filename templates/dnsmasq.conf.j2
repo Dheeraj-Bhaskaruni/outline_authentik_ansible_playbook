@@ -1,0 +1,17 @@
+# Answers only the app hostnames, with the address that belongs to the network
+# the query arrived on (localise-queries applies to hosts-file entries), and
+# forwards everything else. Runs with host networking so it can see which
+# interface a query used.
+no-resolv
+no-hosts
+addn-hosts=/etc/dnsmasq.hosts
+bind-interfaces
+{% for ip in private_path_bind_ips %}
+listen-address={{ ip }}
+{% endfor %}
+localise-queries
+cache-size=1000
+log-facility=-
+{% for dns in private_path_upstream_dns %}
+server={{ dns }}
+{% endfor %}

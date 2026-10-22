@@ -1,0 +1,47 @@
+#!/bin/bash
+# Nightly backup: PostgreSQL dump + restic snapshot of configs and uploads to
+# every configured repository. Rendered by Ansible; edit group_vars instead.
+set -euo pipefail
+umask 077
+
+BACKUP_DIR={{ backup_dir | quote }}
+OUTLINE_DIR={{ outline_dir | quote }}
+STACK_ROOT={{ stack_root | quote }}
+HEALTHCHECK_URL={{ backup_healthcheck_url | quote }}
+REPOS=({{ backup_repositories | map(attribute='name') | map('quote') | join(' ') }})
+KEEP=(--keep-daily {{ backup_keep_daily | int }} --keep-weekly {{ backup_keep_weekly | int }} --keep-monthly {{ backup_keep_monthly | int }})
+
+ping() {
+  [ -n "$HEALTHCHECK_URL" ] || return 0
+  curl -fsS -m 10 --retry 3 -o /dev/null "$HEALTHCHECK_URL$1" || true
+}
+fail() { echo "backup failed: $1" >&2; ping /fail; exit 1; }
+trap 'fail "line $LINENO"' ERR
+
+ping /start
+
+# 1. Consistent database dump (custom format, restorable with pg_restore).
+docker compose -f "$OUTLINE_DIR/docker-compose.yml" exec -T postgres \
+  pg_dump -U {{ outline_db_user | quote }} -Fc {{ outline_db_name | quote }} \
+  > "$BACKUP_DIR/dumps/outline.dump.tmp"
+mv "$BACKUP_DIR/dumps/outline.dump.tmp" "$BACKUP_DIR/dumps/outline.dump"
+
+# 2. Uploaded files live in a named Docker volume.
+UPLOADS=$(docker volume inspect outline_storage-data --format '{{ "{{ .Mountpoint }}" }}')
+
+# 3. Snapshot to each repository; initialise on first use; prune by policy;
+#    verify a sample of the data once a week.
+for repo in "${REPOS[@]}"; do
+  (
+    set -a; . "$BACKUP_DIR/$repo.env"; set +a
+    restic snapshots --quiet >/dev/null 2>&1 || restic init
+    restic backup --quiet --tag outline \
+      --exclude "$BACKUP_DIR/dumps/*.tmp" \
+      "$STACK_ROOT" "$UPLOADS"
+    restic forget --quiet --prune "${KEEP[@]}"
+    if [ "$(date +%u)" = "7" ]; then restic check --quiet --read-data-subset=5%; fi
+    echo "backup to $repo ok"
+  )
+done
+
+ping ""

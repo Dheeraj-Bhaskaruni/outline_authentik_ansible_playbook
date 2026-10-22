@@ -1,15 +1,11 @@
 {
 	admin off
 	email {$ACME_EMAIL}
-	servers {
-		# cloudflared runs on the private edge network; keep its X-Forwarded-* headers.
-		trusted_proxies static private_ranges
-	}
 }
 
 (secure_headers) {
 	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin
 		-Server
@@ -19,21 +15,18 @@
 (cloudflare_tls) {
 	tls {
 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
-		resolvers 1.1.1.1 1.0.0.1
+		resolvers {{ private_path_upstream_dns | join(' ') }}
 	}
 }
 
-# Browser traffic arrives from cloudflared (after Cloudflare Access).
-# The Outline container reaches the same hostname over the edge network alias,
-# so OIDC discovery/token calls stay on this host and never cross Access.
-{{ authentik_hostname }} {
+# Private path: these hostnames resolve to the Tailscale/LAN address of this
+# host (dnsmasq), where Caddy terminates TLS with a real certificate obtained
+# over DNS-01. Nothing here is reachable from the Internet.
+{% for app in apps | selectattr('private') %}
+{{ app.hostname }} {
 	import cloudflare_tls
 	import secure_headers
-	reverse_proxy authentik-server:9000
+	reverse_proxy {{ app.upstream | regex_replace('^https?://', '') }}
 }
 
-{{ outline_hostname }} {
-	import cloudflare_tls
-	import secure_headers
-	reverse_proxy outline:3000
-}
+{% endfor %}

@@ -1,45 +1,55 @@
 ---
-# Base paths
+# ===========================================================================
+# Personal knowledge platform: Outline behind Cloudflare Access (humans) with a
+# private Tailscale/LAN path (your machines). See docs/ for the runbooks.
+# Variables are grouped by tier; override them in production.yml / secrets.yml.
+# ===========================================================================
+
+# --- Paths -----------------------------------------------------------------
 stack_root: /opt/selfhosted
 outline_dir: "{{ stack_root }}/outline"
-authentik_dir: "{{ stack_root }}/authentik"
 edge_dir: "{{ stack_root }}/edge"
+backup_dir: "{{ stack_root }}/backup"
 
-# Enable for a domain deployment. See docs/cloudflare-security.md first.
+# --- Mode ------------------------------------------------------------------
+# production_mode: HTTPS URLs, immutable image digests, real SMTP.
 production_mode: false
 
-# Select tested release tags or digests before production; never auto-upgrade databases.
-outline_image: docker.getoutline.com/outlinewiki/outline:latest
-authentik_image: ghcr.io/goauthentik/server:latest
-postgres_image: postgres:16
+# --- Images (pin digests in production.yml) ---------------------------------
+outline_image: docker.getoutline.com/outlinewiki/outline:latest   # >= 1.11.0 for mobile OAuth
+postgres_image: postgres:16        # 17/18 move PGDATA; upgrade via the restore drill
 redis_image: redis:7
+cloudflared_image: cloudflare/cloudflared:latest
+caddy_image: caddy:2
+caddy_builder_image: caddy:2-builder
+alpine_image: alpine:3.20          # base for the dnsmasq container
+python_image: python:3.12-alpine   # automation (webhook consumer)
 
-# Who signs users in to Outline.
-#   cloudflare - Outline logs in through Cloudflare Access (Google, Microsoft,
-#                GitHub... whatever IdP you enable there). No Authentik stack,
-#                no private TLS proxy, one login for everything. Requires
-#                cloudflare_tunnel_enabled: true. Recommended.
-#   authentik  - self-hosted Authentik IdP behind Access (two logins, more RAM).
-auth_mode: authentik
-
-# Public URLs
-outline_url: "http://100.71.38.75:3000"
-authentik_external_url: "http://100.71.38.75:9000"
-
-# Workspace name Outline gives the first team created on login.
+# --- App tier: Outline --------------------------------------------------------
+# Lab default: loopback only. Set the real https URL in production.yml.
+outline_url: "http://127.0.0.1:3000"
 outline_app_name: Outline
+outline_hostname: "{{ outline_url | urlsplit('hostname') }}"
 
-# Outline app secrets (change for each deployment)
 outline_secret_key: "CHANGE_ME_64_PLUS_CHARS"
 outline_utils_secret: "CHANGE_ME_64_PLUS_CHARS"
-
-# Outline infra credentials
 outline_db_user: outline
 outline_db_password: "CHANGE_ME_RANDOM_HEX_32_BYTES"
 outline_db_name: outline
 
+# Outline's own rate limiter (per IP). The private path has no edge limiter,
+# so keep this on. Raise the multiplier if many agents write in bulk.
+outline_rate_limiter_enabled: true
+outline_rate_limiter_requests: 1000
+outline_rate_limiter_window_seconds: 60
+outline_rate_limiter_multiplier: 1
+# Dynamic client registration is what the Android app (Inkharbor) and MCP
+# clients use. Only works when MCP is enabled in Settings > AI.
+outline_oauth_disable_dcr: false
+
 # MailHog is a development inbox, not an outbound mail provider.
 mailhog_enabled: true
+mailhog_image: mailhog/mailhog:latest
 outline_smtp_host: mailhog
 outline_smtp_port: 1025
 outline_smtp_from_email: outline@local
@@ -47,70 +57,90 @@ outline_smtp_secure: false
 outline_smtp_username: ""
 outline_smtp_password: ""
 
-# OIDC settings from Authentik provider
-outline_oidc_slug: outline
-outline_oidc_client_id: "CHANGE_ME_CLIENT_ID"
-outline_oidc_client_secret: "CHANGE_ME_CLIENT_SECRET"
-outline_oidc_username_claim: "{{ 'preferred_username' if auth_mode == 'authentik' else 'email' }}"
-outline_oidc_display_name: "{{ 'Authentik' if auth_mode == 'authentik' else 'Cloudflare Access' }}"
+# Login: Outline signs users in over OIDC against a Cloudflare "Access for
+# SaaS" application, which in turn uses Google (or any IdP you enable).
+cloudflare_access_team_name: ""           # <team>.cloudflareaccess.com
+cloudflare_access_oidc_client_id: ""
+# secrets.yml: cloudflare_access_oidc_client_secret
+cloudflare_access_oidc_issuer_url: "https://{{ cloudflare_access_team_name }}.cloudflareaccess.com/cdn-cgi/access/sso/oidc/{{ cloudflare_access_oidc_client_id }}"
+outline_oidc_username_claim: email
+outline_oidc_display_name: "Cloudflare Access"
 outline_oidc_scopes: "openid profile email"
 
-# Authentik secrets/credentials
-authentik_secret_key: "CHANGE_ME_64_PLUS_CHARS"
-authentik_db_user: authentik
-authentik_db_password: "CHANGE_ME_RANDOM_HEX_32_BYTES"
-authentik_db_name: authentik
-
-# ---------------------------------------------------------------------------
-# Cloudflare edge: Access-protected Cloudflare Tunnel + private HTTPS proxy.
-# When enabled, Outline and Authentik publish NO host ports at all. The only
-# way in is an outbound tunnel whose connector rejects every request without a
-# valid Cloudflare Access token. See docs/cloudflare-security.md.
-# ---------------------------------------------------------------------------
+# --- Edge tier: Cloudflare Tunnel + Access (humans from anywhere) ------------
 cloudflare_tunnel_enabled: false
 edge_network: selfhosted_edge
-
-# Pin digests in production.yml. Caddy is rebuilt with the Cloudflare DNS module
-# so it can obtain browser-trusted certificates without any open inbound port.
-caddy_image: caddy:2
-caddy_builder_image: caddy:2-builder
-cloudflared_image: cloudflare/cloudflared:latest
-
-# Let's Encrypt expiry notices go here.
-acme_email: ""
-
-# Zero Trust team name (the <team>.cloudflareaccess.com prefix) and the
-# Application Audience (AUD) tag of each self-hosted Access application.
-cloudflare_access_team_name: ""
+# AUD tag of the self-hosted Access application for the Outline hostname.
 cloudflare_access_outline_aud: ""
-cloudflare_access_authentik_aud: ""   # authentik mode only
+# Optional path-scoped Access applications (notes.example.com/api/* and /mcp)
+# carrying Service Auth policies for machines that cannot join the tailnet.
+# Their AUD tags must be listed so cloudflared accepts their tokens.
+cloudflare_access_api_aud: ""
+cloudflare_access_mcp_aud: ""
+# secrets.yml: cloudflare_tunnel_credentials (JSON from `cloudflared tunnel create`)
 
-# auth_mode: cloudflare - the Access for SaaS (OIDC) application that Outline
-# uses as its identity provider. Client ID here, client secret in secrets.yml
-# as cloudflare_access_oidc_client_secret.
-cloudflare_access_oidc_client_id: ""
+# --- Private path: same hostname over Tailscale and/or the home LAN -----------
+# Caddy serves the apps with a Let's Encrypt certificate (DNS-01 through a
+# zone-scoped Cloudflare token) bound ONLY to the listed IPs; dnsmasq answers
+# the hostnames with the matching IP for each network. Nothing is public.
+private_path_enabled: false
+private_path_tailscale_ip: ""      # auto-detected with `tailscale ip -4` when empty
+private_path_lan_ip: ""            # optional, e.g. 192.168.1.20 (Ethernet at home)
+private_path_lan_cidr: ""          # optional, e.g. 192.168.1.0/24 (firewall allow)
+private_path_upstream_dns: ["1.1.1.1", "1.0.0.1"]
+acme_email: ""
+# secrets.yml: cloudflare_dns_api_token (Zone.Zone:Read + Zone.DNS:Edit, one zone)
 
-# From secrets.yml (vault):
-#   cloudflare_tunnel_credentials        - contents of the tunnel credentials JSON
-#   cloudflare_access_oidc_client_secret - auth_mode: cloudflare
-#   cloudflare_dns_api_token             - auth_mode: authentik; scoped token:
-#                                          Zone.Zone:Read + Zone.DNS:Edit, this zone only
+# --- Apps served by the edge and the private path ------------------------------
+# Add a service = one Compose directory + one entry here. cloudflared ingress,
+# Caddy site blocks and dnsmasq records are all generated from this list.
+apps:
+  - name: outline
+    hostname: "{{ outline_hostname }}"
+    upstream: http://outline:3000
+    access_auds: >-
+      {{ [cloudflare_access_outline_aud]
+         + ([cloudflare_access_api_aud] if cloudflare_access_api_aud else [])
+         + ([cloudflare_access_mcp_aud] if cloudflare_access_mcp_aud else []) }}
+    private: true
 
-# Derived values; do not override.
-outline_hostname: "{{ outline_url | urlsplit('hostname') }}"
-authentik_hostname: "{{ authentik_external_url | urlsplit('hostname') }}"
-edge_private_tls_enabled: "{{ cloudflare_tunnel_enabled | bool and auth_mode == 'authentik' }}"
-cloudflare_access_oidc_issuer_url: "https://{{ cloudflare_access_team_name }}.cloudflareaccess.com/cdn-cgi/access/sso/oidc/{{ cloudflare_access_oidc_client_id }}"
+# --- Ops tier: firewall ----------------------------------------------------------
+# Off by default so a first run cannot lock you out.
+firewall_enabled: false
+firewall_ssh_port: 22
+firewall_ssh_source: any           # e.g. 100.64.0.0/10 to allow SSH from the tailnet only
+
+# --- Ops tier: backups (restic) ---------------------------------------------------
+backup_enabled: false
+backup_schedule: "*-*-* 03:30:00"
+backup_healthcheck_url: ""         # healthchecks.io ping URL (optional)
+backup_keep_daily: 14
+backup_keep_weekly: 8
+backup_keep_monthly: 12
+# One entry per destination. `env` holds non-secret settings; put keys in
+# secrets.yml and reference them here, e.g. "{{ backup_r2_access_key }}".
+backup_repositories: []
+#  - name: r2
+#    repository: "s3:https://<account>.r2.cloudflarestorage.com/<bucket>"
+#    env:
+#      AWS_ACCESS_KEY_ID: "{{ backup_r2_access_key }}"
+#      AWS_SECRET_ACCESS_KEY: "{{ backup_r2_secret_key }}"
+#  - name: usb
+#    repository: /mnt/backup/restic
+#    env: {}
+# secrets.yml: backup_restic_password
+
+# --- Automation: webhook consumer for bots (optional) -------------------------------
+automation_enabled: false
+# secrets.yml: outline_webhook_secret (from Outline > Settings > Webhooks)
+
+# --- Derived (do not override) -------------------------------------------------------
+outline_edge_attached: "{{ cloudflare_tunnel_enabled | bool or private_path_enabled | bool }}"
+edge_stack_enabled: "{{ cloudflare_tunnel_enabled | bool or private_path_enabled | bool }}"
+private_path_bind_ips: >-
+  {{ ([private_path_tailscale_ip] if private_path_tailscale_ip else [])
+     + ([private_path_lan_ip] if private_path_lan_ip else []) }}
 cloudflare_tunnel_credentials_parsed: >-
   {{ cloudflare_tunnel_credentials
      if cloudflare_tunnel_credentials is mapping
      else cloudflare_tunnel_credentials | from_json }}
-
-# ---------------------------------------------------------------------------
-# Host firewall (UFW). Off by default so a first run cannot lock you out.
-# With the tunnel enabled nothing listens publicly, so only SSH is allowed.
-# ---------------------------------------------------------------------------
-firewall_enabled: false
-firewall_ssh_port: 22
-# Restrict SSH to a trusted range, for example Tailscale: 100.64.0.0/10
-firewall_ssh_source: any

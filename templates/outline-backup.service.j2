@@ -1,0 +1,10 @@
+[Unit]
+Description=Outline backup (pg_dump + restic)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ backup_dir }}/backup.sh
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,6 @@
+# One line per bind address; dnsmasq returns the one on the asking network.
+{% for app in apps | selectattr('private') %}
+{% for ip in private_path_bind_ips %}
+{{ ip }} {{ app.hostname }}
+{% endfor %}
+{% endfor %}

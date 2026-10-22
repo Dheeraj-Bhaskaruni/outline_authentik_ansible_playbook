@@ -5,6 +5,12 @@ services:
       POSTGRES_USER: {{ outline_db_user }}
       POSTGRES_PASSWORD: {{ outline_db_password | to_json }}
       POSTGRES_DB: {{ outline_db_name }}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
     volumes:
       - database-data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -19,8 +25,8 @@ services:
   outline:
     image: {{ outline_image | to_json }}
     env_file: ./docker.env
-{% if cloudflare_tunnel_enabled | bool %}
-    # Reachable only through Caddy on the private edge network; no host ports.
+{% if outline_edge_attached | bool %}
+    # Reachable only from the edge stack (cloudflared / Caddy); no host ports.
     networks:
       - default
       - edge
@@ -31,19 +37,35 @@ services:
     volumes:
       - storage-data:/var/lib/outline/data
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
 {% if mailhog_enabled | bool %}
   mailhog:
-    image: mailhog/mailhog:latest
+    image: {{ mailhog_image | to_json }}
     ports:
       - "127.0.0.1:8025:8025"
     restart: unless-stopped
-{% endif %}
 
-{% if cloudflare_tunnel_enabled | bool %}
+{% endif %}
+{% if automation_enabled | bool %}
+  automation:
+    # Webhook consumer for bots. Only Outline can reach it (same Compose network).
+    image: {{ python_image | to_json }}
+    command: ["python", "-I", "/app/webhook_consumer.py"]
+    env_file: ./automation.env
+    volumes:
+      - ./webhook_consumer.py:/app/webhook_consumer.py:ro
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+{% endif %}
+{% if outline_edge_attached | bool %}
 networks:
   default:
   edge:

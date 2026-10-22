@@ -1,0 +1,170 @@
+---
+# Pure variable checks. No host access; the offline test suite runs exactly
+# these tasks against good and bad inputs.
+- name: Require a supported target
+  ansible.builtin.assert:
+    that:
+      - ansible_os_family == "Debian"
+    fail_msg: "Target a Debian/Ubuntu server; the default localhost inventory must not be used on macOS."
+
+- name: Validate Outline settings
+  ansible.builtin.assert:
+    that:
+      - outline_url is match('^https?://[^/\\s]+$')
+      - outline_app_name | length > 0
+      - outline_db_user is match('^[a-zA-Z_][a-zA-Z0-9_]*$')
+      - outline_db_name is match('^[a-zA-Z_][a-zA-Z0-9_]*$')
+      - outline_oidc_username_claim is match('^[a-zA-Z0-9_.]+$')
+      - outline_rate_limiter_requests | int > 0
+      - outline_rate_limiter_window_seconds | int > 0
+      - outline_rate_limiter_multiplier | int > 0
+      - "mailhog_enabled | bool or outline_smtp_host != 'mailhog'"
+    fail_msg: "Check the Outline URL (no trailing slash), database identifiers, rate limiter and SMTP settings."
+
+- name: Reject placeholder or unsafe Outline secrets
+  ansible.builtin.assert:
+    that:
+      - outline_secret_key is match('^[a-fA-F0-9]{64}$')
+      - outline_utils_secret is match('^[a-fA-F0-9]{64}$')
+      - outline_db_password is match('^[a-fA-F0-9]{64,}$')
+      - "[outline_secret_key, outline_utils_secret, outline_db_password] | unique | length == 3"
+    fail_msg: "Supply three separate `openssl rand -hex 32` secrets in encrypted secrets.yml; see README.md."
+  no_log: true
+
+- name: Validate Cloudflare Access login (OIDC) settings
+  ansible.builtin.assert:
+    that:
+      - cloudflare_access_team_name is match('^[a-z0-9-]+$')
+      - cloudflare_access_oidc_client_id is match('^[A-Za-z0-9._-]{16,}$')
+      - cloudflare_access_oidc_client_secret is defined
+      - cloudflare_access_oidc_client_secret | length >= 32
+      - "'CHANGE_ME' not in cloudflare_access_oidc_client_secret"
+    fail_msg: >-
+      Outline signs in through a Cloudflare Access for SaaS (OIDC) application: set the team
+      name, its client ID and, in secrets.yml, its client secret. See docs/cloudflare-security.md.
+  no_log: true
+
+- name: Require production transport and mail settings
+  ansible.builtin.assert:
+    that:
+      - outline_url is match('^https://')
+      - not mailhog_enabled | bool
+      - outline_smtp_host | length > 0
+      - "'@' in outline_smtp_from_email"
+    fail_msg: "Production requires an HTTPS URL and a real SMTP service."
+  when: production_mode | bool
+
+- name: Require immutable production images
+  ansible.builtin.assert:
+    that:
+      - item is match('^.+@sha256:[a-f0-9]{64}$')
+    fail_msg: "Set tested image digests for every image in use before production ({{ item }})."
+  loop: >-
+    {{ [outline_image, postgres_image, redis_image]
+       + ([cloudflared_image] if cloudflare_tunnel_enabled | bool else [])
+       + ([caddy_image, caddy_builder_image, alpine_image] if private_path_enabled | bool else [])
+       + ([python_image] if automation_enabled | bool else []) }}
+  when: production_mode | bool
+
+- name: Validate the apps list
+  ansible.builtin.assert:
+    that:
+      - item.name is match('^[a-z0-9-]+$')
+      - item.hostname is match('^[a-z0-9.-]+\.[a-z]{2,}$')
+      - item.upstream is match('^https?://[a-zA-Z0-9_.-]+(:[0-9]+)?$')
+      - item.private is boolean
+      - not cloudflare_tunnel_enabled | bool or item.access_auds | length > 0
+      - not cloudflare_tunnel_enabled | bool or item.access_auds | select('match', '^[a-f0-9]{64}$') | list | length == item.access_auds | length
+      - not cloudflare_tunnel_enabled | bool or item.access_auds | unique | length == item.access_auds | length
+    fail_msg: "Each app needs a name, a real hostname, an http(s) upstream and (with the tunnel) distinct 64-hex Access AUD tags."
+  loop: "{{ apps }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: edge_stack_enabled | bool
+
+- name: Require unique app hostnames
+  ansible.builtin.assert:
+    that:
+      - apps | map(attribute='hostname') | unique | length == apps | length
+      - apps | map(attribute='name') | unique | length == apps | length
+    fail_msg: "App names and hostnames must be unique."
+  when: edge_stack_enabled | bool
+
+- name: Require HTTPS when the app is published
+  ansible.builtin.assert:
+    that:
+      - outline_url is match('^https://')
+      - "'.' in outline_hostname"
+      - edge_network is match('^[a-zA-Z0-9_.-]+$')
+    fail_msg: "A published Outline needs an https URL on a real hostname."
+  when: edge_stack_enabled | bool
+
+- name: Validate Cloudflare Tunnel settings
+  ansible.builtin.assert:
+    that:
+      - cloudflare_access_outline_aud is match('^[a-f0-9]{64}$')
+      - cloudflare_tunnel_credentials is defined
+      - cloudflare_tunnel_credentials_parsed is mapping
+      - cloudflare_tunnel_credentials_parsed.TunnelID | default('') is match('^[0-9a-f-]{36}$')
+      - cloudflare_tunnel_credentials_parsed.AccountTag | default('') is match('^[0-9a-f]{32}$')
+      - cloudflare_tunnel_credentials_parsed.TunnelSecret | default('') | length >= 32
+    fail_msg: >-
+      The tunnel needs the Outline Access application's AUD tag and, in secrets.yml, the
+      credentials JSON written by `cloudflared tunnel create`. See docs/cloudflare-security.md.
+  no_log: true
+  when: cloudflare_tunnel_enabled | bool
+
+- name: Validate private path settings
+  ansible.builtin.assert:
+    that:
+      - private_path_tailscale_ip == '' or private_path_tailscale_ip is match('^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$')
+      - private_path_lan_ip == '' or private_path_lan_ip is match('^(10\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.[0-9]{1,3}\.[0-9]{1,3}$')
+      - private_path_lan_cidr == '' or private_path_lan_cidr is match('^(10\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$')
+      - private_path_lan_cidr == '' or private_path_lan_ip != ''
+      - private_path_upstream_dns | length > 0
+      - "'@' in acme_email"
+      - cloudflare_dns_api_token is defined
+      - cloudflare_dns_api_token | length >= 32
+      - "'CHANGE_ME' not in cloudflare_dns_api_token"
+    fail_msg: >-
+      The private path binds only to a Tailscale (100.64.0.0/10) and/or RFC1918 LAN address and needs
+      acme_email plus, in secrets.yml, a zone-scoped Cloudflare DNS token. See docs/private-path.md.
+  no_log: true
+  when: private_path_enabled | bool
+
+- name: Validate firewall settings
+  ansible.builtin.assert:
+    that:
+      - firewall_ssh_port | int > 0
+      - firewall_ssh_port | int < 65536
+      - firewall_ssh_source is match('^(any|[0-9a-fA-F.:]+(/[0-9]{1,3})?)$')
+    fail_msg: "Set firewall_ssh_port and firewall_ssh_source (an IP/CIDR or 'any') so SSH stays reachable."
+  when: firewall_enabled | bool
+
+- name: Validate backup settings
+  ansible.builtin.assert:
+    that:
+      - backup_repositories | length > 0
+      - backup_repositories | map(attribute='name') | select('match', '^[a-z0-9-]+$') | list | length == backup_repositories | length
+      - backup_repositories | map(attribute='name') | unique | length == backup_repositories | length
+      - backup_repositories | map(attribute='repository') | select('match', '^(s3:https://|b2:|sftp:|/).+') | list | length == backup_repositories | length
+      - backup_restic_password is defined
+      - backup_restic_password | length >= 32
+      - "'CHANGE_ME' not in backup_restic_password"
+      - backup_healthcheck_url == '' or backup_healthcheck_url is match('^https://[^\\s]+$')
+      - backup_keep_daily | int > 0 and backup_keep_weekly | int > 0 and backup_keep_monthly | int > 0
+    fail_msg: >-
+      Backups need at least one restic repository (s3:https://..., b2:..., sftp:... or an absolute
+      path), a strong backup_restic_password in secrets.yml and an https healthcheck URL if set.
+  no_log: true
+  when: backup_enabled | bool
+
+- name: Validate automation settings
+  ansible.builtin.assert:
+    that:
+      - outline_webhook_secret is defined
+      - outline_webhook_secret | length >= 32
+      - "'CHANGE_ME' not in outline_webhook_secret"
+    fail_msg: "The webhook consumer needs outline_webhook_secret (from Outline > Settings > Webhooks) in secrets.yml."
+  no_log: true
+  when: automation_enabled | bool

@@ -1,52 +1,78 @@
 ---
 # Copy to production.yml (gitignored), then replace every example value.
-# Cloudflare Zero Trust objects (tunnel, Access applications, DNS CNAMEs) are
-# created once by hand or CLI; docs/cloudflare-security.md has the exact steps.
+# Cloudflare objects (tunnel, Access applications, DNS CNAME) are created once;
+# docs/cloudflare-security.md has the steps. docs/private-path.md covers Tailscale.
 production_mode: true
 outline_url: https://notes.example.com
 outline_app_name: My Notes
 
-# Recommended: sign in with Google (or any IdP) through Cloudflare Access.
-# No Authentik, no private TLS proxy, one login, App Launcher as the dashboard.
-auth_mode: cloudflare
+# --- Login: Google through Cloudflare Access -----------------------------------
+# Zero Trust > Settings > Custom Pages shows <team>.cloudflareaccess.com
+cloudflare_access_team_name: example-team
 # Zero Trust > Access controls > Applications > (SaaS app, OIDC) > Client ID
 cloudflare_access_oidc_client_id: CHANGE_ME_CLIENT_ID
+# client secret -> secrets.yml
 
-# Set real immutable digests for compatible, tested releases.
-# Existing data must follow the vendor's upgrade path.
+# --- Images: set real immutable digests for tested releases ------------------------
+# Outline >= 1.11.0 for the Android app's OAuth login.
 outline_image: docker.getoutline.com/outlinewiki/outline@sha256:CHANGE_ME
-postgres_image: postgres@sha256:CHANGE_ME
+postgres_image: postgres@sha256:CHANGE_ME          # a 16.x digest
 redis_image: redis@sha256:CHANGE_ME
 cloudflared_image: cloudflare/cloudflared@sha256:CHANGE_ME
+caddy_image: caddy@sha256:CHANGE_ME
+caddy_builder_image: caddy@sha256:CHANGE_ME        # the matching "-builder" tag's digest
+alpine_image: alpine@sha256:CHANGE_ME
+python_image: python@sha256:CHANGE_ME              # only if automation_enabled
 
+# --- Mail ----------------------------------------------------------------------------
 mailhog_enabled: false
 outline_smtp_host: mail.example.com
 outline_smtp_port: 465
 outline_smtp_secure: true
 outline_smtp_from_email: notes@example.com
 outline_smtp_username: notes@example.com
-# Store outline_smtp_password in encrypted secrets.yml.
+# outline_smtp_password -> secrets.yml
 
-# --- Cloudflare edge -------------------------------------------------------
+# --- Public edge: Cloudflare Tunnel + Access (humans from anywhere) -------------------
 cloudflare_tunnel_enabled: true
-# Zero Trust > Settings > Custom Pages shows the team domain <team>.cloudflareaccess.com
-cloudflare_access_team_name: example-team
-# Zero Trust > Access controls > Applications > (self-hosted app) > Overview > Application Audience (AUD) Tag
+# Self-hosted Access app for notes.example.com > Overview > Application Audience (AUD) Tag
 cloudflare_access_outline_aud: CHANGE_ME_64_HEX
-# cloudflare_tunnel_credentials and cloudflare_access_oidc_client_secret live in secrets.yml.
+# Optional path-scoped apps with Service Auth policies (machines without Tailscale):
+# cloudflare_access_api_aud: CHANGE_ME_64_HEX     # notes.example.com/api/*
+# cloudflare_access_mcp_aud: CHANGE_ME_64_HEX     # notes.example.com/mcp
+# cloudflare_tunnel_credentials -> secrets.yml
 
-# --- Host firewall ---------------------------------------------------------
-# Enable once you have confirmed how you reach SSH. Example: Tailscale only.
+# --- Private path: same hostname over Tailscale and the home LAN ------------------------
+private_path_enabled: true
+# private_path_tailscale_ip is detected on the host (tailscale ip -4).
+private_path_lan_ip: 192.168.1.20          # optional: the Mac mini's Ethernet address
+private_path_lan_cidr: 192.168.1.0/24      # optional: who on the LAN may use it
+acme_email: you@example.com
+# cloudflare_dns_api_token -> secrets.yml
+
+# --- Firewall: enable once you know how you reach SSH --------------------------------------
 firewall_enabled: true
 firewall_ssh_port: 22
-firewall_ssh_source: 100.64.0.0/10
+firewall_ssh_source: 100.64.0.0/10         # SSH from the tailnet only
 
-# --- Alternative: self-hosted Authentik as the identity provider -------------
-# auth_mode: authentik
-# authentik_external_url: https://auth.example.com
-# authentik_image: ghcr.io/goauthentik/server@sha256:CHANGE_ME
-# caddy_image: caddy@sha256:CHANGE_ME
-# caddy_builder_image: caddy@sha256:CHANGE_ME     # the matching "-builder" tag's digest
-# acme_email: you@example.com
-# cloudflare_access_authentik_aud: CHANGE_ME_64_HEX
-# plus authentik_*, outline_oidc_client_* and cloudflare_dns_api_token in secrets.yml
+# --- Backups: restic, nightly ---------------------------------------------------------------
+backup_enabled: true
+backup_healthcheck_url: https://hc-ping.com/CHANGE_ME
+backup_repositories:
+  - name: r2
+    repository: "s3:https://CHANGE_ME.r2.cloudflarestorage.com/knowledge-backup"
+    env:
+      AWS_ACCESS_KEY_ID: "{{ backup_r2_access_key }}"
+      AWS_SECRET_ACCESS_KEY: "{{ backup_r2_secret_key }}"
+  - name: usb
+    repository: /mnt/backup/restic
+  # - name: b2
+  #   repository: "b2:CHANGE_ME-bucket:outline"
+  #   env:
+  #     B2_ACCOUNT_ID: "{{ backup_b2_account_id }}"
+  #     B2_ACCOUNT_KEY: "{{ backup_b2_account_key }}"
+# backup_restic_password -> secrets.yml
+
+# --- Automation: webhook consumer for bots (optional) ----------------------------------------
+automation_enabled: false
+# outline_webhook_secret -> secrets.yml

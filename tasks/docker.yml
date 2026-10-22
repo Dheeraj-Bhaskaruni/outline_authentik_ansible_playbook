@@ -1,0 +1,58 @@
+---
+- name: Check Docker Compose is installed
+  ansible.builtin.command: docker compose version --short
+  register: compose_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Require Docker Compose
+  ansible.builtin.assert:
+    that:
+      - compose_version.rc == 0
+    fail_msg: "Install Docker Engine and the Compose plugin from Docker's repository first; see docs/mac-mini-host.md."
+
+- name: Ensure Docker service is running
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Read Docker Engine version
+  ansible.builtin.command:
+    argv:
+      - docker
+      - version
+      - --format
+      - '{{ "{{.Server.Version}}" }}'
+  register: docker_version
+  changed_when: false
+  check_mode: false
+
+- name: Require Docker with isolated localhost published ports
+  ansible.builtin.assert:
+    that:
+      - docker_version.stdout is version('28.0.0', '>=')
+    fail_msg: "Docker Engine 28+ is required; older releases can expose localhost-published ports to adjacent network hosts."
+
+- name: Create stack root
+  ansible.builtin.file:
+    path: "{{ stack_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Check edge network
+  ansible.builtin.command: docker network inspect {{ edge_network | quote }}
+  register: edge_network_inspect
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: edge_stack_enabled | bool
+
+- name: Create edge network
+  ansible.builtin.command: docker network create {{ edge_network | quote }}
+  when:
+    - edge_stack_enabled | bool
+    - edge_network_inspect.rc != 0

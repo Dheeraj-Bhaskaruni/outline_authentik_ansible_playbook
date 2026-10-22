@@ -1,0 +1,66 @@
+---
+# Nightly: pg_dump + restic to every configured repository, prune, weekly
+# check, healthchecks ping. The vault on your control machine is the other
+# half of a restore (SECRET_KEY encrypts fields in the database).
+- name: Install restic
+  ansible.builtin.apt:
+    name: restic
+    state: present
+    update_cache: true
+  when: backup_enabled | bool
+
+- name: Create backup directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ backup_dir }}"
+    - "{{ backup_dir }}/dumps"
+  when: backup_enabled | bool
+
+- name: Render restic repository credentials
+  ansible.builtin.template:
+    src: templates/restic.env.j2
+    dest: "{{ backup_dir }}/{{ item.name }}.env"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ backup_repositories }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  diff: false
+  when: backup_enabled | bool
+
+- name: Render backup script
+  ansible.builtin.template:
+    src: templates/backup.sh.j2
+    dest: "{{ backup_dir }}/backup.sh"
+    owner: root
+    group: root
+    mode: "0700"
+  when: backup_enabled | bool
+
+- name: Render backup systemd units
+  ansible.builtin.template:
+    src: "templates/{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - outline-backup.service
+    - outline-backup.timer
+  notify: Reload systemd
+  when: backup_enabled | bool
+
+- name: Enable backup timer
+  ansible.builtin.systemd:
+    name: outline-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: backup_enabled | bool

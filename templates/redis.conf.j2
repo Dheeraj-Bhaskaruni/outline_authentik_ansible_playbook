@@ -1,2 +1,4 @@
+# Outline keeps its job queues (Bull) in Redis. Evicting keys would silently
+# drop jobs, so refuse writes instead of evicting when memory runs out.
 maxmemory 256mb
-maxmemory-policy allkeys-lru
+maxmemory-policy noeviction

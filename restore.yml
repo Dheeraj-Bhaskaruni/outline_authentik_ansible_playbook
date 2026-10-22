@@ -1,0 +1,84 @@
+---
+# Restore Outline from a restic snapshot. Destructive: replaces the database
+# and uploads. Run against a scratch host first (the "restore drill").
+#
+#   ansible-playbook restore.yml -e @production.yml -e @secrets.yml --ask-vault-pass \
+#     -e restore_repository=r2 -e restore_snapshot=latest -e restore_confirm=yes
+- name: Restore Outline from backup
+  hosts: all
+  become: true
+  vars:
+    restore_snapshot: latest
+    restore_target: /var/tmp/outline-restore
+
+  pre_tasks:
+    - name: Refuse to run without explicit confirmation
+      ansible.builtin.assert:
+        that:
+          - restore_confirm | default('') == 'yes'
+          - restore_repository is defined
+          - restore_repository in (backup_repositories | map(attribute='name') | list)
+        fail_msg: "Pass -e restore_confirm=yes and -e restore_repository=<name from backup_repositories>."
+
+  tasks:
+    - name: Stop Outline (keep the database running)
+      ansible.builtin.command: docker compose stop outline
+      args:
+        chdir: "{{ outline_dir }}"
+      changed_when: true
+
+    - name: Restore files from restic
+      ansible.builtin.shell: |
+        set -euo pipefail
+        set -a; . {{ backup_dir }}/{{ restore_repository }}.env; set +a
+        rm -rf {{ restore_target | quote }}
+        restic restore {{ restore_snapshot | quote }} --target {{ restore_target | quote }}
+      args:
+        executable: /bin/bash
+      changed_when: true
+      no_log: true
+
+    - name: Locate the uploads volume
+      ansible.builtin.command: docker volume inspect outline_storage-data --format '{{ "{{ .Mountpoint }}" }}'
+      register: uploads_volume
+      changed_when: false
+
+    - name: Restore uploaded files
+      ansible.builtin.shell: |
+        set -euo pipefail
+        rsync -a --delete {{ restore_target }}{{ uploads_volume.stdout }}/ {{ uploads_volume.stdout }}/
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Restore the database
+      ansible.builtin.shell: |
+        set -euo pipefail
+        docker compose exec -T postgres pg_restore -U {{ outline_db_user | quote }} \
+          -d {{ outline_db_name | quote }} --clean --if-exists --no-owner \
+          < {{ restore_target }}{{ backup_dir }}/dumps/outline.dump
+      args:
+        chdir: "{{ outline_dir }}"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Start Outline
+      ansible.builtin.command: docker compose up -d outline
+      args:
+        chdir: "{{ outline_dir }}"
+      changed_when: true
+
+    - name: Wait for Outline health
+      ansible.builtin.command: docker compose exec -T outline wget -qO- http://localhost:3000/_health
+      args:
+        chdir: "{{ outline_dir }}"
+      register: health
+      retries: 30
+      delay: 5
+      until: health.rc == 0
+      changed_when: false
+
+    - name: Remove restore scratch directory
+      ansible.builtin.file:
+        path: "{{ restore_target }}"
+        state: absent

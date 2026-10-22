@@ -1,0 +1,31 @@
+---
+- name: Validate Compose configuration before starting any stack
+  ansible.builtin.command: docker compose config --quiet
+  args:
+    chdir: "{{ item }}"
+  loop: "{{ [outline_dir] + ([edge_dir] if edge_stack_enabled | bool else []) }}"
+  changed_when: false
+  no_log: true
+
+- name: Start Outline stack
+  ansible.builtin.command: docker compose up -d --remove-orphans
+  args:
+    chdir: "{{ outline_dir }}"
+  changed_when: false
+
+- name: Start edge stack
+  ansible.builtin.command: docker compose up -d --build --remove-orphans
+  args:
+    chdir: "{{ edge_dir }}"
+  changed_when: false
+  when: edge_stack_enabled | bool
+
+- name: Show endpoints
+  ansible.builtin.debug:
+    msg:
+      - "Outline: {{ outline_url }}"
+      - "Login: Cloudflare Access ({{ cloudflare_access_team_name }}.cloudflareaccess.com) via OIDC"
+      - "Public edge: {{ 'Cloudflare Tunnel + Access, no host ports' if cloudflare_tunnel_enabled | bool else 'none' }}"
+      - "Private path: {{ (private_path_bind_ips | join(', ')) if private_path_enabled | bool else 'none' }}"
+      - "Dashboard: https://{{ cloudflare_access_team_name }}.cloudflareaccess.com"
+      - "Backups: {{ (backup_repositories | map(attribute='name') | join(', ')) if backup_enabled | bool else 'disabled' }}"

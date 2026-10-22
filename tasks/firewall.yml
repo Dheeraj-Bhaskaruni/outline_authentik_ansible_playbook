@@ -1,0 +1,60 @@
+---
+# Deny inbound except SSH, plus the private path's 443/53 from its networks.
+# Docker-published ports bypass UFW; the bind address is the real control.
+# dnsmasq runs with host networking, so its rule here does matter.
+- name: Install UFW
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+  when: firewall_enabled | bool
+
+- name: Allow SSH through UFW
+  ansible.builtin.command: >-
+    ufw allow from {{ firewall_ssh_source | quote }} to any
+    port {{ firewall_ssh_port | int }} proto tcp comment 'ssh'
+  register: ufw_ssh
+  changed_when: "'Skipping' not in ufw_ssh.stdout"
+  when: firewall_enabled | bool
+
+- name: Allow the private path from the tailnet and LAN
+  ansible.builtin.command: >-
+    ufw allow from {{ item.source | quote }} to {{ item.ip | quote }}
+    port {{ item.port }} proto {{ item.proto }} comment 'private path'
+  register: ufw_private
+  changed_when: "'Skipping' not in ufw_private.stdout"
+  loop: >-
+    {{ ([{'source': '100.64.0.0/10', 'ip': private_path_tailscale_ip, 'port': 443, 'proto': 'tcp'},
+         {'source': '100.64.0.0/10', 'ip': private_path_tailscale_ip, 'port': 53, 'proto': 'udp'},
+         {'source': '100.64.0.0/10', 'ip': private_path_tailscale_ip, 'port': 53, 'proto': 'tcp'}]
+        if private_path_tailscale_ip else [])
+       + ([{'source': private_path_lan_cidr, 'ip': private_path_lan_ip, 'port': 443, 'proto': 'tcp'},
+           {'source': private_path_lan_cidr, 'ip': private_path_lan_ip, 'port': 53, 'proto': 'udp'},
+           {'source': private_path_lan_cidr, 'ip': private_path_lan_ip, 'port': 53, 'proto': 'tcp'}]
+          if private_path_lan_ip and private_path_lan_cidr else []) }}
+  loop_control:
+    label: "{{ item.source }} -> {{ item.ip }}:{{ item.port }}/{{ item.proto }}"
+  when:
+    - firewall_enabled | bool
+    - private_path_enabled | bool
+
+- name: Set UFW default policies
+  ansible.builtin.command: "ufw default {{ item }}"
+  loop:
+    - deny incoming
+    - allow outgoing
+  changed_when: false
+  when: firewall_enabled | bool
+
+- name: Read UFW status
+  ansible.builtin.command: ufw status
+  register: ufw_status
+  changed_when: false
+  check_mode: false
+  when: firewall_enabled | bool
+
+- name: Enable UFW
+  ansible.builtin.command: ufw --force enable
+  when:
+    - firewall_enabled | bool
+    - "'Status: active' not in ufw_status.stdout"

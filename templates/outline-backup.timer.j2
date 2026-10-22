@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly Outline backup
+
+[Timer]
+OnCalendar={{ backup_schedule }}
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

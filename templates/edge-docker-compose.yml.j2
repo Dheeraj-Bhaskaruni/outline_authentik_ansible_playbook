@@ -1,5 +1,19 @@
 services:
-{% if auth_mode == 'authentik' %}
+{% if cloudflare_tunnel_enabled | bool %}
+  cloudflared:
+    image: {{ cloudflared_image | to_json }}
+    command: ["tunnel", "--config", "/etc/cloudflared/config.yml", "run"]
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+    networks:
+      - edge
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+{% endif %}
+{% if private_path_enabled | bool %}
   caddy:
     build:
       context: ./caddy
@@ -10,41 +24,49 @@ services:
     environment:
       ACME_EMAIL: {{ acme_email | to_json }}
       CLOUDFLARE_API_TOKEN: {{ cloudflare_dns_api_token | to_json }}
+    ports:
+{% for ip in private_path_bind_ips %}
+      - "{{ ip }}:443:443"
+{% endfor %}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:
-      edge:
-        aliases:
-          - {{ outline_hostname | to_json }}
-          - {{ authentik_hostname | to_json }}
+      - edge
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
 
-{% endif %}
-  cloudflared:
-    image: {{ cloudflared_image | to_json }}
-    command: ["tunnel", "--config", "/etc/cloudflared/config.yml", "run"]
+  dnsmasq:
+    build:
+      context: ./dnsmasq
+      args:
+        ALPINE_IMAGE: {{ alpine_image | to_json }}
+    image: selfhosted-dnsmasq:local
+    # Host networking: binds only the addresses listed in dnsmasq.conf and can
+    # tell which interface a query came from (localise-queries).
+    network_mode: host
     volumes:
-      - ./cloudflared:/etc/cloudflared:ro
-    networks:
-      - edge
-{% if auth_mode == 'authentik' %}
-    depends_on:
-      - caddy
-{% endif %}
+      - ./dnsmasq/dnsmasq.conf:/etc/dnsmasq.conf:ro
+      - ./dnsmasq/dnsmasq.hosts:/etc/dnsmasq.hosts:ro
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
     read_only: true
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
 
+{% endif %}
 networks:
   edge:
     external: true
     name: {{ edge_network | to_json }}
-{% if auth_mode == 'authentik' %}
+{% if private_path_enabled | bool %}
 
 volumes:
   caddy_data:

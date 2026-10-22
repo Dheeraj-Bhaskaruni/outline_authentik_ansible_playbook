@@ -7,19 +7,18 @@ Desktop needs a newer macOS anyway. Run Linux on it.
 
 ## Budget
 
-| Component (auth_mode: cloudflare) | Typical RSS |
+| Component | Typical RSS |
 | --- | --- |
 | Outline | 300–500 MB |
 | PostgreSQL 16 | 50–150 MB |
 | Redis | 10–30 MB |
 | cloudflared | 20–40 MB |
+| Caddy + dnsmasq (private path) | 40–80 MB |
 | Debian + Docker | 300–500 MB |
 | **Total** | **under 1.5 GB** |
 
-Authentik mode adds its server, worker, a second PostgreSQL and Caddy: about
-1.5–2 GB more. Either way 8 GB leaves plenty of room; the dual-core CPU is
-the limit, and it is enough for a personal wiki. Authentik's stated minimum
-is 2 cores and 2 GB.
+8 GB leaves plenty of room; the dual-core CPU is the limit, and it is enough
+for a personal wiki plus a few agents writing to it.
 
 ## Install Debian 13
 
@@ -49,15 +48,18 @@ is 2 cores and 2 GB.
    `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin`,
    `docker-compose-plugin`.
 
-8. Tailscale for SSH without opening a port:
+8. Tailscale: SSH without opening a port, and the [private path](private-path.md):
 
    ```bash
    curl -fsSL https://tailscale.com/install.sh | sh
-   sudo tailscale up --ssh
+   sudo tailscale up --ssh --advertise-tags=tag:kb
    ```
 
    Then `firewall_ssh_source: 100.64.0.0/10` in `production.yml` restricts
    SSH to the tailnet.
+
+9. USB backup disk (optional but recommended): format ext4, add to
+   `/etc/fstab` with `nofail`, mounted at `/mnt/backup`.
 
 ## Headless behaviour
 

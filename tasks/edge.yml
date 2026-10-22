@@ -1,0 +1,140 @@
+---
+# Edge tier: cloudflared (Cloudflare Access for humans) and the private path
+# (Caddy + dnsmasq bound to the Tailscale/LAN addresses for your machines).
+- name: Create edge directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ edge_dir }}", mode: "0755" }
+    - { path: "{{ edge_dir }}/cloudflared", mode: "0755" }   # traversed by uid 65532
+    - { path: "{{ edge_dir }}/caddy", mode: "0755" }
+    - { path: "{{ edge_dir }}/dnsmasq", mode: "0755" }
+  when: edge_stack_enabled | bool
+
+- name: Render cloudflared config
+  ansible.builtin.template:
+    src: templates/cloudflared-config.yml.j2
+    dest: "{{ edge_dir }}/cloudflared/config.yml"
+    owner: "65532"
+    group: "65532"
+    mode: "0400"
+  when: cloudflare_tunnel_enabled | bool
+
+- name: Render cloudflared credentials
+  ansible.builtin.template:
+    src: templates/cloudflared-credentials.json.j2
+    dest: "{{ edge_dir }}/cloudflared/credentials.json"
+    owner: "65532"
+    group: "65532"
+    mode: "0400"
+  no_log: true
+  diff: false
+  when: cloudflare_tunnel_enabled | bool
+
+- name: Detect the Tailscale address
+  ansible.builtin.command: tailscale ip -4
+  register: tailscale_ip_cmd
+  changed_when: false
+  check_mode: false
+  when:
+    - private_path_enabled | bool
+    - private_path_tailscale_ip == ''
+
+- name: Record the Tailscale address
+  ansible.builtin.set_fact:
+    private_path_tailscale_ip: "{{ tailscale_ip_cmd.stdout | trim }}"
+  when:
+    - private_path_enabled | bool
+    - private_path_tailscale_ip == ''
+
+- name: Require at least one private bind address inside the expected ranges
+  ansible.builtin.assert:
+    that:
+      - private_path_bind_ips | length > 0
+      - private_path_tailscale_ip == '' or private_path_tailscale_ip is match('^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$')
+    fail_msg: "The private path needs a Tailscale (100.64.0.0/10) address (install Tailscale or set private_path_tailscale_ip) and/or private_path_lan_ip."
+  when: private_path_enabled | bool
+
+- name: Start Docker after Tailscale so bound ports exist
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker.service.d/after-tailscale.conf
+    content: |
+      [Unit]
+      After=tailscaled.service
+      Wants=tailscaled.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+  when:
+    - private_path_enabled | bool
+    - private_path_tailscale_ip != ''
+
+- name: Install Caddy Dockerfile
+  ansible.builtin.copy:
+    src: files/caddy/Dockerfile
+    dest: "{{ edge_dir }}/caddy/Dockerfile"
+    owner: root
+    group: root
+    mode: "0644"
+  when: private_path_enabled | bool
+
+- name: Install dnsmasq Dockerfile
+  ansible.builtin.copy:
+    src: files/dnsmasq/Dockerfile
+    dest: "{{ edge_dir }}/dnsmasq/Dockerfile"
+    owner: root
+    group: root
+    mode: "0644"
+  when: private_path_enabled | bool
+
+- name: Render Caddyfile
+  ansible.builtin.template:
+    src: templates/Caddyfile.j2
+    dest: "{{ edge_dir }}/Caddyfile"
+    owner: root
+    group: root
+    mode: "0644"
+  when: private_path_enabled | bool
+
+- name: Render dnsmasq config
+  ansible.builtin.template:
+    src: templates/dnsmasq.conf.j2
+    dest: "{{ edge_dir }}/dnsmasq/dnsmasq.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: private_path_enabled | bool
+
+- name: Render dnsmasq hosts
+  ansible.builtin.template:
+    src: templates/dnsmasq.hosts.j2
+    dest: "{{ edge_dir }}/dnsmasq/dnsmasq.hosts"
+    owner: root
+    group: root
+    mode: "0644"
+  when: private_path_enabled | bool
+
+- name: Render edge compose file
+  ansible.builtin.template:
+    src: templates/edge-docker-compose.yml.j2
+    dest: "{{ edge_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+  when: edge_stack_enabled | bool
+
+- name: Validate cloudflared ingress rules
+  ansible.builtin.command: >-
+    docker compose run --rm --no-deps cloudflared
+    tunnel --config /etc/cloudflared/config.yml ingress validate
+  args:
+    chdir: "{{ edge_dir }}"
+  changed_when: false
+  when: cloudflare_tunnel_enabled | bool

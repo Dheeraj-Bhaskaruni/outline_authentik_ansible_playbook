@@ -1,0 +1,54 @@
+---
+- name: Create Outline directory
+  ansible.builtin.file:
+    path: "{{ outline_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render Outline compose file
+  ansible.builtin.template:
+    src: templates/outline-docker-compose.yml.j2
+    dest: "{{ outline_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Render Outline env file
+  ansible.builtin.template:
+    src: templates/outline-docker.env.j2
+    dest: "{{ outline_dir }}/docker.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Render Outline redis config
+  ansible.builtin.template:
+    src: templates/redis.conf.j2
+    dest: "{{ outline_dir }}/redis.conf"
+    mode: "0644"
+
+- name: Install webhook consumer
+  ansible.builtin.copy:
+    src: files/automation/webhook_consumer.py
+    dest: "{{ outline_dir }}/webhook_consumer.py"
+    owner: root
+    group: root
+    mode: "0644"
+  when: automation_enabled | bool
+
+- name: Render automation env file
+  ansible.builtin.template:
+    src: templates/automation.env.j2
+    dest: "{{ outline_dir }}/automation.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+  when: automation_enabled | bool
