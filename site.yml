@@ -1,34 +1,191 @@
 ---
-- name: Deploy Outline + Authentik
+- name: Deploy Outline (+ optional Authentik) behind Cloudflare
   hosts: all
   become: true
 
   pre_tasks:
+    - name: Require a supported target
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Debian"
+        fail_msg: "Target a Debian/Ubuntu server; the default localhost inventory must not be used on macOS."
+
     - name: Validate required variables
       ansible.builtin.assert:
         that:
+          - auth_mode in ['authentik', 'cloudflare']
           - outline_url is defined
           - outline_secret_key is defined
           - outline_utils_secret is defined
+          - outline_db_password is defined
+        fail_msg: "Set auth_mode (authentik|cloudflare) and the Outline variables; see group_vars/all.yml and README.md."
+
+    - name: Validate Authentik variables
+      ansible.builtin.assert:
+        that:
+          - authentik_external_url is defined
           - authentik_secret_key is defined
+          - authentik_db_password is defined
           - outline_oidc_client_id is defined
           - outline_oidc_client_secret is defined
           - outline_oidc_slug is defined
-        fail_msg: "Set required variables in group_vars/all.yml before running this playbook"
+        fail_msg: "auth_mode: authentik needs the Authentik URL, secrets and the Outline OIDC client credentials."
+      when: auth_mode == 'authentik'
+
+    - name: Reject placeholder or unsafe Outline secrets
+      ansible.builtin.assert:
+        that:
+          - outline_secret_key is match('^[a-fA-F0-9]{64}$')
+          - outline_utils_secret is match('^[a-fA-F0-9]{64}$')
+          - outline_db_password is match('^[a-fA-F0-9]{64,}$')
+          - "[outline_secret_key, outline_utils_secret, outline_db_password] | unique | length == 3"
+        fail_msg: "Supply separate random hex secrets using an encrypted secrets.yml; see README.md."
+      no_log: true
+
+    - name: Reject placeholder or unsafe Authentik secrets
+      ansible.builtin.assert:
+        that:
+          - authentik_secret_key is match('^[a-fA-F0-9]{64,}$')
+          - authentik_db_password is match('^[a-fA-F0-9]{64,}$')
+          - outline_oidc_client_id | length > 0
+          - "'CHANGE_ME' not in outline_oidc_client_id"
+          - outline_oidc_client_secret | length >= 24
+          - "'CHANGE_ME' not in outline_oidc_client_secret"
+          - "[outline_secret_key, outline_utils_secret, authentik_secret_key, outline_db_password, authentik_db_password] | unique | length == 5"
+        fail_msg: "Supply separate random hex secrets and real OIDC credentials using an encrypted secrets.yml; see README.md."
+      no_log: true
+      when: auth_mode == 'authentik'
+
+    - name: Validate application settings
+      ansible.builtin.assert:
+        that:
+          - outline_url is match('^https?://[^/\\s]+$')
+          - outline_app_name | length > 0
+          - outline_db_user is match('^[a-zA-Z_][a-zA-Z0-9_]*$')
+          - outline_db_name is match('^[a-zA-Z_][a-zA-Z0-9_]*$')
+          - outline_oidc_username_claim is match('^[a-zA-Z0-9_.]+$')
+          - "mailhog_enabled | bool or outline_smtp_host != 'mailhog'"
+        fail_msg: "Check URLs (no trailing slash), database identifiers and SMTP settings."
+
+    - name: Validate Authentik application settings
+      ansible.builtin.assert:
+        that:
+          - authentik_external_url is match('^https?://[^/\\s]+$')
+          - outline_oidc_slug is match('^[a-zA-Z0-9_-]+$')
+          - authentik_db_user is match('^[a-zA-Z_][a-zA-Z0-9_]*$')
+          - authentik_db_name is match('^[a-zA-Z_][a-zA-Z0-9_]*$')
+        fail_msg: "Check the Authentik URL (no trailing slash), database identifiers and OIDC slug."
+      when: auth_mode == 'authentik'
+
+    - name: Require production transport and mail settings
+      ansible.builtin.assert:
+        that:
+          - outline_url is match('^https://')
+          - auth_mode != 'authentik' or authentik_external_url is match('^https://')
+          - not mailhog_enabled | bool
+          - outline_smtp_host | length > 0
+          - "'@' in outline_smtp_from_email"
+        fail_msg: "Production requires HTTPS for the apps and a real SMTP service."
+      when: production_mode | bool
+
+    - name: Require immutable production images
+      ansible.builtin.assert:
+        that:
+          - item is match('^.+@sha256:[a-f0-9]{64}$')
+        fail_msg: "Set tested image digests for every image in use (apps, databases, cloudflared, Caddy) before production."
+      loop: >-
+        {{ [outline_image, postgres_image, redis_image]
+           + ([authentik_image] if auth_mode == 'authentik' else [])
+           + ([cloudflared_image] if cloudflare_tunnel_enabled | bool else [])
+           + ([caddy_image, caddy_builder_image] if edge_private_tls_enabled | bool else []) }}
+      when: production_mode | bool
+
+    - name: Require the tunnel for Cloudflare Access login
+      ansible.builtin.assert:
+        that:
+          - cloudflare_tunnel_enabled | bool
+        fail_msg: "auth_mode: cloudflare only works behind the Cloudflare Tunnel; set cloudflare_tunnel_enabled: true."
+      when: auth_mode == 'cloudflare'
+
+    - name: Validate Cloudflare edge settings
+      ansible.builtin.assert:
+        that:
+          - outline_url is match('^https://')
+          - "'.' in outline_hostname"
+          - edge_network is match('^[a-zA-Z0-9_.-]+$')
+          - cloudflare_access_team_name is match('^[a-z0-9-]+$')
+          - cloudflare_access_outline_aud is match('^[a-f0-9]{64}$')
+        fail_msg: >-
+          Cloudflare mode needs an HTTPS Outline URL, the Zero Trust team name and the
+          64-hex Access AUD tag of the Outline application. See docs/cloudflare-security.md.
+      when: cloudflare_tunnel_enabled | bool
+
+    - name: Validate Cloudflare edge settings for Authentik
+      ansible.builtin.assert:
+        that:
+          - authentik_external_url is match('^https://')
+          - outline_hostname != authentik_hostname
+          - "'.' in authentik_hostname"
+          - "'@' in acme_email"
+          - cloudflare_access_authentik_aud is match('^[a-f0-9]{64}$')
+          - cloudflare_access_outline_aud != cloudflare_access_authentik_aud
+        fail_msg: >-
+          Authentik behind Cloudflare needs its own HTTPS hostname, acme_email and a distinct
+          Access AUD tag. See docs/cloudflare-security.md.
+      when: edge_private_tls_enabled | bool
+
+    - name: Validate Cloudflare Access OIDC settings
+      ansible.builtin.assert:
+        that:
+          - cloudflare_access_oidc_client_id is match('^[A-Za-z0-9._-]{16,}$')
+          - cloudflare_access_oidc_client_secret is defined
+          - cloudflare_access_oidc_client_secret | length >= 32
+          - "'CHANGE_ME' not in cloudflare_access_oidc_client_secret"
+        fail_msg: >-
+          auth_mode: cloudflare needs the Access for SaaS (OIDC) application's client ID and,
+          in secrets.yml, its client secret. See docs/cloudflare-security.md.
+      no_log: true
+      when: auth_mode == 'cloudflare'
+
+    - name: Validate Cloudflare edge secrets
+      ansible.builtin.assert:
+        that:
+          - cloudflare_tunnel_credentials is defined
+          - cloudflare_tunnel_credentials_parsed is mapping
+          - cloudflare_tunnel_credentials_parsed.TunnelID | default('') is match('^[0-9a-f-]{36}$')
+          - cloudflare_tunnel_credentials_parsed.AccountTag | default('') is match('^[0-9a-f]{32}$')
+          - cloudflare_tunnel_credentials_parsed.TunnelSecret | default('') | length >= 32
+          - not edge_private_tls_enabled | bool or cloudflare_dns_api_token is defined
+          - not edge_private_tls_enabled | bool or cloudflare_dns_api_token | length >= 32
+          - not edge_private_tls_enabled | bool or 'CHANGE_ME' not in cloudflare_dns_api_token
+        fail_msg: >-
+          Put the tunnel credentials JSON (from 'cloudflared tunnel create') and, for Authentik,
+          a zone-scoped DNS API token in encrypted secrets.yml. See docs/cloudflare-security.md.
+      no_log: true
+      when: cloudflare_tunnel_enabled | bool
+
+    - name: Validate firewall settings
+      ansible.builtin.assert:
+        that:
+          - firewall_ssh_port | int > 0
+          - firewall_ssh_port | int < 65536
+          - firewall_ssh_source is match('^(any|[0-9a-fA-F.:]+(/[0-9]{1,3})?)$')
+        fail_msg: "Set firewall_ssh_port and firewall_ssh_source (an IP/CIDR or 'any') so SSH stays reachable."
+      when: firewall_enabled | bool
 
   tasks:
-    - name: Install base packages (Debian/Ubuntu)
-      ansible.builtin.apt:
-        name:
-          - ca-certificates
-          - curl
-          - gnupg
-          - lsb-release
-          - docker.io
-          - docker-compose-plugin
-        state: present
-        update_cache: true
-      when: ansible_os_family == "Debian"
+    - name: Check Docker Compose is installed
+      ansible.builtin.command: docker compose version --short
+      register: compose_version
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Require Docker Compose
+      ansible.builtin.assert:
+        that:
+          - compose_version.rc == 0
+        fail_msg: "Install a supported Docker Engine and Compose plugin using Docker's official Debian/Ubuntu instructions first. See README.md."
 
     - name: Ensure Docker service is running
       ansible.builtin.service:
@@ -36,27 +193,51 @@
         state: started
         enabled: true
 
+    - name: Read Docker Engine version
+      ansible.builtin.command:
+        argv:
+          - docker
+          - version
+          - --format
+          - '{{ "{{.Server.Version}}" }}'
+      register: docker_version
+      changed_when: false
+      check_mode: false
+
+    - name: Require Docker with isolated localhost published ports
+      ansible.builtin.assert:
+        that:
+          - docker_version.stdout is version('28.0.0', '>=')
+        fail_msg: "Docker Engine 28+ is required; older releases can expose localhost-published ports to adjacent network hosts."
+
     - name: Create stack directories
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
+        owner: root
+        group: root
         mode: "0755"
-      loop:
-        - "{{ stack_root }}"
-        - "{{ outline_dir }}"
-        - "{{ authentik_dir }}"
+      loop: "{{ [stack_root, outline_dir] + ([authentik_dir] if auth_mode == 'authentik' else []) }}"
 
     - name: Render Outline compose file
       ansible.builtin.template:
         src: templates/outline-docker-compose.yml.j2
         dest: "{{ outline_dir }}/docker-compose.yml"
-        mode: "0644"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      diff: false
 
     - name: Render Outline env file
       ansible.builtin.template:
         src: templates/outline-docker.env.j2
         dest: "{{ outline_dir }}/docker.env"
         mode: "0600"
+        owner: root
+        group: root
+      no_log: true
+      diff: false
 
     - name: Render Outline redis config
       ansible.builtin.template:
@@ -68,23 +249,187 @@
       ansible.builtin.template:
         src: templates/authentik-docker-compose.yml.j2
         dest: "{{ authentik_dir }}/docker-compose.yml"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      diff: false
+      when: auth_mode == 'authentik'
+
+    # ------------------------------------------------------------------
+    # Cloudflare edge: private Docker network, an Access-enforcing
+    # cloudflared connector and (Authentik mode only) Caddy with DNS-01 TLS
+    # for the private Outline -> Authentik route. Nothing listens on the host.
+    # ------------------------------------------------------------------
+    - name: Create edge directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ edge_dir }}", mode: "0755" }
+        # cloudflared runs as uid 65532 and must traverse this directory.
+        - { path: "{{ edge_dir }}/cloudflared", mode: "0755" }
+      when: cloudflare_tunnel_enabled | bool
+
+    - name: Create Caddy build directory
+      ansible.builtin.file:
+        path: "{{ edge_dir }}/caddy"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: edge_private_tls_enabled | bool
+
+    - name: Install Caddy Dockerfile
+      ansible.builtin.copy:
+        src: files/caddy/Dockerfile
+        dest: "{{ edge_dir }}/caddy/Dockerfile"
+        owner: root
+        group: root
         mode: "0644"
+      when: edge_private_tls_enabled | bool
+
+    - name: Render Caddyfile
+      ansible.builtin.template:
+        src: templates/Caddyfile.j2
+        dest: "{{ edge_dir }}/Caddyfile"
+        owner: root
+        group: root
+        mode: "0644"
+      when: edge_private_tls_enabled | bool
+
+    - name: Render cloudflared config
+      ansible.builtin.template:
+        src: templates/cloudflared-config.yml.j2
+        dest: "{{ edge_dir }}/cloudflared/config.yml"
+        owner: "65532"
+        group: "65532"
+        mode: "0400"
+      when: cloudflare_tunnel_enabled | bool
+
+    - name: Render cloudflared credentials
+      ansible.builtin.template:
+        src: templates/cloudflared-credentials.json.j2
+        dest: "{{ edge_dir }}/cloudflared/credentials.json"
+        owner: "65532"
+        group: "65532"
+        mode: "0400"
+      no_log: true
+      diff: false
+      when: cloudflare_tunnel_enabled | bool
+
+    - name: Render edge compose file
+      ansible.builtin.template:
+        src: templates/edge-docker-compose.yml.j2
+        dest: "{{ edge_dir }}/docker-compose.yml"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      diff: false
+      when: cloudflare_tunnel_enabled | bool
+
+    - name: Check edge network
+      ansible.builtin.command: docker network inspect {{ edge_network | quote }}
+      register: edge_network_inspect
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: cloudflare_tunnel_enabled | bool
+
+    - name: Create edge network
+      ansible.builtin.command: docker network create {{ edge_network | quote }}
+      when:
+        - cloudflare_tunnel_enabled | bool
+        - edge_network_inspect.rc != 0
+
+    - name: Validate Compose configuration before starting any stack
+      ansible.builtin.command: docker compose config --quiet
+      args:
+        chdir: "{{ item }}"
+      loop: >-
+        {{ ([authentik_dir] if auth_mode == 'authentik' else []) + [outline_dir]
+           + ([edge_dir] if cloudflare_tunnel_enabled | bool else []) }}
+      changed_when: false
+      no_log: true
+
+    - name: Validate cloudflared ingress rules
+      ansible.builtin.command: >-
+        docker compose run --rm --no-deps cloudflared
+        tunnel --config /etc/cloudflared/config.yml ingress validate
+      args:
+        chdir: "{{ edge_dir }}"
+      changed_when: false
+      when: cloudflare_tunnel_enabled | bool
+
+    # ------------------------------------------------------------------
+    # Host firewall. Deny all inbound except SSH; Docker publishes nothing
+    # publicly in tunnel mode and only loopback ports in lab mode.
+    # ------------------------------------------------------------------
+    - name: Install UFW
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+        update_cache: true
+      when: firewall_enabled | bool
+
+    - name: Allow SSH through UFW
+      ansible.builtin.command: >-
+        ufw allow from {{ firewall_ssh_source | quote }} to any
+        port {{ firewall_ssh_port | int }} proto tcp comment 'ssh'
+      register: ufw_ssh
+      changed_when: "'Skipping' not in ufw_ssh.stdout"
+      when: firewall_enabled | bool
+
+    - name: Set UFW default policies
+      ansible.builtin.command: "ufw default {{ item }}"
+      loop:
+        - deny incoming
+        - allow outgoing
+      changed_when: false
+      when: firewall_enabled | bool
+
+    - name: Read UFW status
+      ansible.builtin.command: ufw status
+      register: ufw_status
+      changed_when: false
+      check_mode: false
+      when: firewall_enabled | bool
+
+    - name: Enable UFW
+      ansible.builtin.command: ufw --force enable
+      when:
+        - firewall_enabled | bool
+        - "'Status: active' not in ufw_status.stdout"
 
     - name: Start Authentik stack
-      ansible.builtin.command: docker compose up -d
+      ansible.builtin.command: docker compose up -d --remove-orphans
       args:
         chdir: "{{ authentik_dir }}"
       changed_when: false
+      when: auth_mode == 'authentik'
 
     - name: Start Outline stack
-      ansible.builtin.command: docker compose up -d
+      ansible.builtin.command: docker compose up -d --remove-orphans
       args:
         chdir: "{{ outline_dir }}"
       changed_when: false
+
+    - name: Start edge stack (cloudflared, plus Caddy for Authentik)
+      ansible.builtin.command: docker compose up -d --build --remove-orphans
+      args:
+        chdir: "{{ edge_dir }}"
+      changed_when: false
+      when: cloudflare_tunnel_enabled | bool
 
     - name: Show endpoints
       ansible.builtin.debug:
         msg:
           - "Outline: {{ outline_url }}"
-          - "Authentik: {{ authentik_external_url }}"
-          - "Next: create/update Authentik app slug '{{ outline_oidc_slug }}' and set redirect URI '{{ outline_url }}/auth/oidc.callback'"
+          - "Login: {{ 'Cloudflare Access (' + cloudflare_access_team_name + '.cloudflareaccess.com) via OIDC' if auth_mode == 'cloudflare' else 'Authentik at ' + authentik_external_url }}"
+          - "Edge: {{ 'Cloudflare Tunnel + Access (no host ports)' if cloudflare_tunnel_enabled | bool else 'loopback ports only; arrange a private route' }}"
+          - "Dashboard: {{ 'https://' + cloudflare_access_team_name + '.cloudflareaccess.com (App Launcher)' if cloudflare_tunnel_enabled | bool else 'n/a' }}"
+          - "{{ 'Next: create/update Authentik app slug ' + outline_oidc_slug + ' with redirect URI ' + outline_url + '/auth/oidc.callback' if auth_mode == 'authentik' else 'Next: confirm the Access SaaS app redirect URL is ' + outline_url + '/auth/oidc.callback' }}"

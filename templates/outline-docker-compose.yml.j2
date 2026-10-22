@@ -1,26 +1,33 @@
 services:
   postgres:
-    image: postgres:16
+    image: {{ postgres_image | to_json }}
     environment:
       POSTGRES_USER: {{ outline_db_user }}
-      POSTGRES_PASSWORD: {{ outline_db_password }}
+      POSTGRES_PASSWORD: {{ outline_db_password | to_json }}
       POSTGRES_DB: {{ outline_db_name }}
     volumes:
       - database-data:/var/lib/postgresql/data
     restart: unless-stopped
 
   redis:
-    image: redis:7
+    image: {{ redis_image | to_json }}
     volumes:
       - ./redis.conf:/redis.conf:ro
     command: ["redis-server", "/redis.conf"]
     restart: unless-stopped
 
   outline:
-    image: docker.getoutline.com/outlinewiki/outline:latest
+    image: {{ outline_image | to_json }}
     env_file: ./docker.env
+{% if cloudflare_tunnel_enabled | bool %}
+    # Reachable only through Caddy on the private edge network; no host ports.
+    networks:
+      - default
+      - edge
+{% else %}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
+{% endif %}
     volumes:
       - storage-data:/var/lib/outline/data
     depends_on:
@@ -28,13 +35,22 @@ services:
       - redis
     restart: unless-stopped
 
+{% if mailhog_enabled | bool %}
   mailhog:
     image: mailhog/mailhog:latest
     ports:
-      - "8025:8025"
-      - "1025:1025"
+      - "127.0.0.1:8025:8025"
     restart: unless-stopped
+{% endif %}
 
+{% if cloudflare_tunnel_enabled | bool %}
+networks:
+  default:
+  edge:
+    external: true
+    name: {{ edge_network | to_json }}
+
+{% endif %}
 volumes:
   database-data:
   storage-data:

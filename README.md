@@ -1,72 +1,95 @@
-# Outline + Authentik Ansible Deployment
+# Outline on your own domain, behind Cloudflare Access
 
-This Ansible project deploys Outline and Authentik using Docker Compose with reusable templates.
+Deploys Outline (wiki/notes) as Docker Compose stacks on a Debian/Ubuntu box
+such as a 2014 Mac mini, publishes it on your domain through an
+Access-protected Cloudflare Tunnel, and signs you in with Google (or any
+identity provider Cloudflare supports). Cloudflare's App Launcher becomes
+your dashboard. Outline's built-in MCP server works with Claude.
 
-## What it sets up
+Guides: [Cloudflare + cPanel runbook](docs/cloudflare-security.md) ·
+[Mac mini host](docs/mac-mini-host.md) · [MCP and AI clients](docs/mcp-and-ai.md)
 
-- Docker + Docker Compose plugin (Debian/Ubuntu)
-- Authentik stack in `/opt/selfhosted/authentik` (default)
-- Outline stack in `/opt/selfhosted/outline` (default)
-- OIDC env wiring from Outline to Authentik
+## Modes
 
-## 1) Edit variables
+| | `auth_mode: cloudflare` (recommended) | `auth_mode: authentik` |
+| --- | --- | --- |
+| Login | Google via Cloudflare Access, once | Access, then Authentik |
+| Containers | Outline, PostgreSQL, Redis, cloudflared | + Authentik server/worker, PostgreSQL, Caddy |
+| RAM | under 1.5 GB | about 3 GB |
+| Extra secrets | Access OIDC client secret | Authentik keys, OIDC client, DNS API token |
+| Use when | personal or small-team notes | you need your own IdP for many apps |
 
-Edit:
+Lab mode (`cloudflare_tunnel_enabled: false`) binds the apps to `127.0.0.1`
+only, for testing over SSH port-forwarding or Tailscale.
 
-- `group_vars/all.yml`
+## Security model
 
-Required values to change:
+- **No host ports in tunnel mode.** An outbound `cloudflared` connector carries
+  traffic and rejects every request without a valid Cloudflare Access token
+  for that hostname. Unknown hostnames return 404. Bots see Cloudflare's
+  login page, never your server.
+- PostgreSQL, Redis and MailHog never publish host ports.
+- Optional UFW firewall: deny inbound except SSH from a range you choose.
+- Credential files are root-owned (`0600`) or owned by the connector's uid
+  (`0400`); secret rendering suppresses logs and diffs.
+- Deployment rejects sample credentials, reused secrets, weak key formats,
+  HTTP URLs in production, floating image tags, and incomplete Cloudflare
+  settings (missing AUD tag, team name, credentials, OIDC client).
+- SSH host key checking is enabled; verify the server fingerprint first.
 
-- `outline_secret_key`
-- `outline_utils_secret`
-- `authentik_secret_key`
-- `outline_oidc_client_id`
-- `outline_oidc_client_secret`
-- `outline_url`
-- `authentik_external_url`
+## Prerequisites
 
-## 2) Generate strong secrets (example)
+Install Ansible on the control machine (`uv venv .venv && uv pip install
+ansible-core pyyaml`). On the target install Docker Engine 28+ and the
+Compose plugin from Docker's repository; see the Mac mini guide for a full
+host setup. Update `inventory.ini` with the host and SSH user. Shared cPanel
+hosting cannot run Docker; the domain, website and email stay on cPanel.
+
+## Configure and deploy
+
+1. Follow Parts A and B of the runbook: move DNS to Cloudflare, add Google as
+   a login method, create the self-hosted Access application (AUD tag), the
+   SaaS/OIDC application (client ID and secret), the tunnel and its DNS CNAME.
+2. Copy `examples/production.yml` to `production.yml` and fill in URLs, team
+   name, AUD tag, client ID, SMTP and tested image digests.
+3. Copy `examples/secrets.yml` to `secrets.yml`: three `openssl rand -hex 32`
+   values, the tunnel credentials JSON, the OIDC client secret. Encrypt with
+   `ansible-vault encrypt secrets.yml`.
+4. Deploy:
+
+   ```bash
+   ansible-playbook site.yml --syntax-check
+   ansible-playbook site.yml -e @production.yml -e @secrets.yml --ask-vault-pass
+   ```
+
+5. Open `https://notes.example.com`, sign in with Google, and your workspace
+   is created. Enable MCP under Settings > AI if you want Claude to use it.
+
+Access authorises who may reach the app; Outline roles decide what they can
+do. On an existing installation keep the current keys and database password;
+changing `POSTGRES_PASSWORD` does not rotate the password inside a volume.
+
+## Verification
 
 ```bash
-openssl rand -hex 32
+.venv/bin/python tests/validate_security.py
 ```
 
-Use separate values for each secret variable.
+Renders the real templates for lab, production, Authentik and Cloudflare-login
+modes and verifies: rejection of unsafe inputs (31 scenarios), loopback-only
+or no host ports, no database publishing, Access enforcement on every tunnel
+hostname with a 404 catch-all, credential file modes, OIDC wiring and HTTPS
+settings. It does not run Docker or touch Cloudflare. Then do the runbook's
+live acceptance checks.
 
-## 3) Run playbook
+## Layout
 
-```bash
-cd /home/dheera/ansible
-ansible-playbook site.yml
-```
-
-## 4) Post-deploy Authentik steps (one-time)
-
-1. Open Authentik admin: `http://<host>:9000/if/admin/`
-2. Create OAuth2/OpenID provider + application for Outline
-3. Set app slug equal to `outline_oidc_slug` (default `outline`)
-4. Set Redirect URI:
-   - `http://<host>:3000/auth/oidc.callback`
-5. Copy Client ID/Client Secret into `group_vars/all.yml`
-6. Re-run:
-
-```bash
-ansible-playbook site.yml
-```
-
-## 5) User requirements
-
-For Outline login to work, Authentik users must have:
-
-- Valid email address
-
-Outline rejects users without email in OIDC claims.
-
-## Re-deploy/update
-
-Re-run `ansible-playbook site.yml` after changing variables.
-
-## Notes
-
-- This is HTTP-only lab config by default.
-- For production, add reverse proxy + TLS and tighten secrets/backups.
+| Path | Purpose |
+| --- | --- |
+| `site.yml` | Playbook: validation, rendering, firewall, Compose stacks |
+| `group_vars/all.yml` | Defaults and documented variables |
+| `templates/*-docker-compose.yml.j2` | Outline, Authentik and edge stacks |
+| `templates/cloudflared-*.j2`, `templates/Caddyfile.j2` | Edge configuration |
+| `files/caddy/Dockerfile` | Caddy with the Cloudflare DNS module (Authentik mode) |
+| `examples/` | Copy to `production.yml` / `secrets.yml` (gitignored) |
+| `tests/validate_security.py` | Offline safety checks |

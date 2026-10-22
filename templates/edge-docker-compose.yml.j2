@@ -1,0 +1,52 @@
+services:
+{% if auth_mode == 'authentik' %}
+  caddy:
+    build:
+      context: ./caddy
+      args:
+        CADDY_IMAGE: {{ caddy_image | to_json }}
+        CADDY_BUILDER_IMAGE: {{ caddy_builder_image | to_json }}
+    image: selfhosted-caddy-cloudflare:local
+    environment:
+      ACME_EMAIL: {{ acme_email | to_json }}
+      CLOUDFLARE_API_TOKEN: {{ cloudflare_dns_api_token | to_json }}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      edge:
+        aliases:
+          - {{ outline_hostname | to_json }}
+          - {{ authentik_hostname | to_json }}
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+{% endif %}
+  cloudflared:
+    image: {{ cloudflared_image | to_json }}
+    command: ["tunnel", "--config", "/etc/cloudflared/config.yml", "run"]
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+    networks:
+      - edge
+{% if auth_mode == 'authentik' %}
+    depends_on:
+      - caddy
+{% endif %}
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+networks:
+  edge:
+    external: true
+    name: {{ edge_network | to_json }}
+{% if auth_mode == 'authentik' %}
+
+volumes:
+  caddy_data:
+  caddy_config:
+{% endif %}

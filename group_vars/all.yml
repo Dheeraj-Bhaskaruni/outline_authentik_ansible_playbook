@@ -3,10 +3,31 @@
 stack_root: /opt/selfhosted
 outline_dir: "{{ stack_root }}/outline"
 authentik_dir: "{{ stack_root }}/authentik"
+edge_dir: "{{ stack_root }}/edge"
+
+# Enable for a domain deployment. See docs/cloudflare-security.md first.
+production_mode: false
+
+# Select tested release tags or digests before production; never auto-upgrade databases.
+outline_image: docker.getoutline.com/outlinewiki/outline:latest
+authentik_image: ghcr.io/goauthentik/server:latest
+postgres_image: postgres:16
+redis_image: redis:7
+
+# Who signs users in to Outline.
+#   cloudflare - Outline logs in through Cloudflare Access (Google, Microsoft,
+#                GitHub... whatever IdP you enable there). No Authentik stack,
+#                no private TLS proxy, one login for everything. Requires
+#                cloudflare_tunnel_enabled: true. Recommended.
+#   authentik  - self-hosted Authentik IdP behind Access (two logins, more RAM).
+auth_mode: authentik
 
 # Public URLs
 outline_url: "http://100.71.38.75:3000"
 authentik_external_url: "http://100.71.38.75:9000"
+
+# Workspace name Outline gives the first team created on login.
+outline_app_name: Outline
 
 # Outline app secrets (change for each deployment)
 outline_secret_key: "CHANGE_ME_64_PLUS_CHARS"
@@ -14,25 +35,82 @@ outline_utils_secret: "CHANGE_ME_64_PLUS_CHARS"
 
 # Outline infra credentials
 outline_db_user: outline
-outline_db_password: outlinepass
+outline_db_password: "CHANGE_ME_RANDOM_HEX_32_BYTES"
 outline_db_name: outline
 
-# SMTP (optional, can stay local mailhog)
+# MailHog is a development inbox, not an outbound mail provider.
+mailhog_enabled: true
 outline_smtp_host: mailhog
 outline_smtp_port: 1025
 outline_smtp_from_email: outline@local
 outline_smtp_secure: false
+outline_smtp_username: ""
+outline_smtp_password: ""
 
 # OIDC settings from Authentik provider
 outline_oidc_slug: outline
 outline_oidc_client_id: "CHANGE_ME_CLIENT_ID"
 outline_oidc_client_secret: "CHANGE_ME_CLIENT_SECRET"
-outline_oidc_username_claim: preferred_username
-outline_oidc_display_name: Authentik
+outline_oidc_username_claim: "{{ 'preferred_username' if auth_mode == 'authentik' else 'email' }}"
+outline_oidc_display_name: "{{ 'Authentik' if auth_mode == 'authentik' else 'Cloudflare Access' }}"
 outline_oidc_scopes: "openid profile email"
 
 # Authentik secrets/credentials
 authentik_secret_key: "CHANGE_ME_64_PLUS_CHARS"
 authentik_db_user: authentik
-authentik_db_password: authentikpass
+authentik_db_password: "CHANGE_ME_RANDOM_HEX_32_BYTES"
 authentik_db_name: authentik
+
+# ---------------------------------------------------------------------------
+# Cloudflare edge: Access-protected Cloudflare Tunnel + private HTTPS proxy.
+# When enabled, Outline and Authentik publish NO host ports at all. The only
+# way in is an outbound tunnel whose connector rejects every request without a
+# valid Cloudflare Access token. See docs/cloudflare-security.md.
+# ---------------------------------------------------------------------------
+cloudflare_tunnel_enabled: false
+edge_network: selfhosted_edge
+
+# Pin digests in production.yml. Caddy is rebuilt with the Cloudflare DNS module
+# so it can obtain browser-trusted certificates without any open inbound port.
+caddy_image: caddy:2
+caddy_builder_image: caddy:2-builder
+cloudflared_image: cloudflare/cloudflared:latest
+
+# Let's Encrypt expiry notices go here.
+acme_email: ""
+
+# Zero Trust team name (the <team>.cloudflareaccess.com prefix) and the
+# Application Audience (AUD) tag of each self-hosted Access application.
+cloudflare_access_team_name: ""
+cloudflare_access_outline_aud: ""
+cloudflare_access_authentik_aud: ""   # authentik mode only
+
+# auth_mode: cloudflare - the Access for SaaS (OIDC) application that Outline
+# uses as its identity provider. Client ID here, client secret in secrets.yml
+# as cloudflare_access_oidc_client_secret.
+cloudflare_access_oidc_client_id: ""
+
+# From secrets.yml (vault):
+#   cloudflare_tunnel_credentials        - contents of the tunnel credentials JSON
+#   cloudflare_access_oidc_client_secret - auth_mode: cloudflare
+#   cloudflare_dns_api_token             - auth_mode: authentik; scoped token:
+#                                          Zone.Zone:Read + Zone.DNS:Edit, this zone only
+
+# Derived values; do not override.
+outline_hostname: "{{ outline_url | urlsplit('hostname') }}"
+authentik_hostname: "{{ authentik_external_url | urlsplit('hostname') }}"
+edge_private_tls_enabled: "{{ cloudflare_tunnel_enabled | bool and auth_mode == 'authentik' }}"
+cloudflare_access_oidc_issuer_url: "https://{{ cloudflare_access_team_name }}.cloudflareaccess.com/cdn-cgi/access/sso/oidc/{{ cloudflare_access_oidc_client_id }}"
+cloudflare_tunnel_credentials_parsed: >-
+  {{ cloudflare_tunnel_credentials
+     if cloudflare_tunnel_credentials is mapping
+     else cloudflare_tunnel_credentials | from_json }}
+
+# ---------------------------------------------------------------------------
+# Host firewall (UFW). Off by default so a first run cannot lock you out.
+# With the tunnel enabled nothing listens publicly, so only SSH is allowed.
+# ---------------------------------------------------------------------------
+firewall_enabled: false
+firewall_ssh_port: 22
+# Restrict SSH to a trusted range, for example Tailscale: 100.64.0.0/10
+firewall_ssh_source: any

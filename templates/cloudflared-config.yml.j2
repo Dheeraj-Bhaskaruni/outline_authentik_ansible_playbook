@@ -1,0 +1,39 @@
+# Locally managed Cloudflare Tunnel. Every public hostname requires a valid
+# Cloudflare Access JWT at the connector, so even a misconfigured Access
+# application cannot expose the origin. Unknown hostnames return 404.
+tunnel: {{ cloudflare_tunnel_credentials_parsed.TunnelID | to_json }}
+credentials-file: /etc/cloudflared/credentials.json
+no-autoupdate: true
+loglevel: info
+
+ingress:
+{% if auth_mode == 'authentik' %}
+  - hostname: {{ outline_hostname | to_json }}
+    service: https://caddy:443
+    originRequest:
+      originServerName: {{ outline_hostname | to_json }}
+      access:
+        required: true
+        teamName: {{ cloudflare_access_team_name | to_json }}
+        audTag:
+          - {{ cloudflare_access_outline_aud | to_json }}
+  - hostname: {{ authentik_hostname | to_json }}
+    service: https://caddy:443
+    originRequest:
+      originServerName: {{ authentik_hostname | to_json }}
+      access:
+        required: true
+        teamName: {{ cloudflare_access_team_name | to_json }}
+        audTag:
+          - {{ cloudflare_access_authentik_aud | to_json }}
+{% else %}
+  - hostname: {{ outline_hostname | to_json }}
+    service: http://outline:3000
+    originRequest:
+      access:
+        required: true
+        teamName: {{ cloudflare_access_team_name | to_json }}
+        audTag:
+          - {{ cloudflare_access_outline_aud | to_json }}
+{% endif %}
+  - service: http_status:404

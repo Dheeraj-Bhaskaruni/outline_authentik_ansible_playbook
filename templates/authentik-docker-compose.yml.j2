@@ -1,51 +1,70 @@
+# authentik 2025.10+ no longer uses Redis; everything runs on PostgreSQL.
 services:
   ak_postgres:
-    image: postgres:16
+    image: {{ postgres_image | to_json }}
     environment:
       POSTGRES_USER: {{ authentik_db_user }}
-      POSTGRES_PASSWORD: {{ authentik_db_password }}
+      POSTGRES_PASSWORD: {{ authentik_db_password | to_json }}
       POSTGRES_DB: {{ authentik_db_name }}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
     volumes:
       - ak_db:/var/lib/postgresql/data
     restart: unless-stopped
 
-  ak_redis:
-    image: redis:7
-    restart: unless-stopped
-
   authentik-server:
-    image: ghcr.io/goauthentik/server:latest
+    image: {{ authentik_image | to_json }}
     command: server
     environment:
-      AUTHENTIK_SECRET_KEY: "{{ authentik_secret_key }}"
+      AUTHENTIK_SECRET_KEY: {{ authentik_secret_key | to_json }}
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
       AUTHENTIK_POSTGRESQL__HOST: ak_postgres
       AUTHENTIK_POSTGRESQL__USER: {{ authentik_db_user }}
-      AUTHENTIK_POSTGRESQL__PASSWORD: {{ authentik_db_password }}
+      AUTHENTIK_POSTGRESQL__PASSWORD: {{ authentik_db_password | to_json }}
       AUTHENTIK_POSTGRESQL__NAME: {{ authentik_db_name }}
-      AUTHENTIK_REDIS__HOST: ak_redis
+{% if cloudflare_tunnel_enabled | bool %}
+    # Reachable only through Caddy on the private edge network; no host ports.
+    networks:
+      - default
+      - edge
+{% else %}
     ports:
-      - "9000:9000"
+      - "127.0.0.1:9000:9000"
+{% endif %}
+    shm_size: 512mb
     depends_on:
-      - ak_postgres
-      - ak_redis
+      ak_postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   authentik-worker:
-    image: ghcr.io/goauthentik/server:latest
+    image: {{ authentik_image | to_json }}
     command: worker
     environment:
-      AUTHENTIK_SECRET_KEY: "{{ authentik_secret_key }}"
+      AUTHENTIK_SECRET_KEY: {{ authentik_secret_key | to_json }}
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
       AUTHENTIK_POSTGRESQL__HOST: ak_postgres
       AUTHENTIK_POSTGRESQL__USER: {{ authentik_db_user }}
-      AUTHENTIK_POSTGRESQL__PASSWORD: {{ authentik_db_password }}
+      AUTHENTIK_POSTGRESQL__PASSWORD: {{ authentik_db_password | to_json }}
       AUTHENTIK_POSTGRESQL__NAME: {{ authentik_db_name }}
-      AUTHENTIK_REDIS__HOST: ak_redis
+    # No Docker socket mount: managed outposts are not used here.
+    shm_size: 512mb
     depends_on:
-      - ak_postgres
-      - ak_redis
+      ak_postgres:
+        condition: service_healthy
     restart: unless-stopped
 
+{% if cloudflare_tunnel_enabled | bool %}
+networks:
+  default:
+  edge:
+    external: true
+    name: {{ edge_network | to_json }}
+
+{% endif %}
 volumes:
   ak_db:

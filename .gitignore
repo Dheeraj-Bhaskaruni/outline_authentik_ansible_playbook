@@ -1,0 +1,8 @@
+.DS_Store
+.venv/
+__pycache__/
+*.retry
+/secrets.yml
+/production.yml
+.vault-password
+.idea/
